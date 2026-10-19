@@ -187,13 +187,13 @@ def build_sample_bars(
         symbol, trading_date, config.weekly_period * config.daily_window
     )
     daily_daily = market_data.get_history(symbol, trading_date, config.daily_window)
-    future_daily = market_data.get_future(symbol, trading_date, config.future_chart_window)
+    future_bars = build_future_bars(market_data, symbol, trading_date, config)
 
     return SampleBars(
         monthly=aggregate_ohlc(monthly_daily, config.monthly_period),
         weekly=aggregate_ohlc(weekly_daily, config.weekly_period),
         daily=aggregate_ohlc(daily_daily, 1),
-        future_12d=aggregate_ohlc(future_daily, 1),
+        future_12d=future_bars,
     )
 
 
@@ -218,6 +218,18 @@ def build_query_bars(
         weekly=aggregate_ohlc(weekly_daily, config.weekly_period),
         daily=aggregate_ohlc(daily_daily, 1),
     )
+
+
+def build_future_bars(
+    market_data: MarketData,
+    symbol: str,
+    trading_date: date | str,
+    config: ProjectConfig = DEFAULT_CONFIG,
+) -> tuple[OHLCBar, ...]:
+    """Build the future-only daily bars used for visual comparison."""
+
+    future_daily = market_data.get_future(symbol, trading_date, config.future_chart_window)
+    return aggregate_ohlc(future_daily, 1)
 
 
 def render_ohlc(
@@ -298,6 +310,17 @@ def build_query_charts(
         for name, bars in query_bars.as_dict().items()
     }
     return QueryCharts(**rendered)
+
+
+def build_future_chart(
+    market_data: MarketData,
+    symbol: str,
+    trading_date: date | str,
+    config: ProjectConfig = DEFAULT_CONFIG,
+) -> GrayscaleImage:
+    """Render only the future comparison chart for a historical sample."""
+
+    return render_ohlc(build_future_bars(market_data, symbol, trading_date, config), config.chart_size)
 
 
 def save_sample_charts(
