@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-项目当前已完成阶段 0：项目基线和技术准备，以及阶段 1：行情数据和样本基础。
+项目当前已完成阶段 0：项目基线和技术准备、阶段 1：行情数据和样本基础，以及阶段 2：多尺度 K 线图生成。
 
 阶段 0 交付内容：
 
@@ -20,6 +20,13 @@
 - 必要字段、OHLC 关系、重复记录和数值合法性校验。
 - 按股票和交易日查询历史窗口与未来窗口。
 - 样本历史数据和未来数据完整性判断。
+
+阶段 2 交付内容：
+
+- 月线、周线和日线 OHLC 聚合。
+- 未来 12 个交易日对照图生成。
+- 黑白 `36×36` 图像渲染。
+- PNG/PGM 序列化和样本图批量保存。
 
 ## 数据格式
 
@@ -49,7 +56,7 @@ validation = market_data.validate_sample(
 print(validation.valid, validation.reasons)
 ```
 
-## 运行阶段一测试
+## 运行项目测试
 
 安装当前本地包：
 
@@ -62,6 +69,20 @@ python3 -m pip install -e .
 ```bash
 python3 -m unittest discover -s tests -v
 ```
+
+## 生成多尺度 K 线图
+
+图像模块提供以下接口：
+
+```python
+from kline_retrieval import MarketData, build_sample_charts, save_sample_charts
+
+market_data = MarketData.from_csv("data/market_data.csv")
+charts = build_sample_charts(market_data, "AAPL", "2024-01-31")
+paths = save_sample_charts(charts, "data/cache", prefix="AAPL_2024-01-31")
+```
+
+查询使用的月线、周线和日线图会参与后续特征提取；`future_12d` 只用于事后对照，不会进入检索特征。
 
 ## 启动数据检查命令
 

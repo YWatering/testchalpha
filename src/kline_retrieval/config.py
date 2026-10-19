@@ -30,6 +30,7 @@ class ProjectConfig:
     monthly_period: int = 20
     weekly_period: int = 5
     daily_window: int = 12
+    future_chart_window: int = 12
     chart_width: int = 36
     chart_height: int = 36
     future_horizons: tuple[int, ...] = (1, 5, 10, 12, 21)
@@ -43,6 +44,7 @@ class ProjectConfig:
         _positive_int(self.monthly_period, "monthly_period")
         _positive_int(self.weekly_period, "weekly_period")
         _positive_int(self.daily_window, "daily_window")
+        _positive_int(self.future_chart_window, "future_chart_window")
         _positive_int(self.chart_width, "chart_width")
         _positive_int(self.chart_height, "chart_height")
         _positive_int(self.default_top_k, "default_top_k")
@@ -68,6 +70,9 @@ class ProjectConfig:
             monthly_period=int(env.get("KLINE_MONTHLY_PERIOD", defaults.monthly_period)),
             weekly_period=int(env.get("KLINE_WEEKLY_PERIOD", defaults.weekly_period)),
             daily_window=int(env.get("KLINE_DAILY_WINDOW", defaults.daily_window)),
+            future_chart_window=int(
+                env.get("KLINE_FUTURE_CHART_WINDOW", defaults.future_chart_window)
+            ),
             chart_width=int(env.get("KLINE_CHART_WIDTH", defaults.chart_width)),
             chart_height=int(env.get("KLINE_CHART_HEIGHT", defaults.chart_height)),
             month_weight=float(env.get("KLINE_MONTH_WEIGHT", defaults.month_weight)),
