@@ -44,6 +44,15 @@
 - 收益直方图和 Gaussian KDE 数据。
 - 可直接转换为 JSON 的分析结果结构。
 
+阶段 5 交付内容：
+
+- FastAPI 健康检查、股票、日期和检索接口。
+- 静态浏览器检索页面。
+- 股票、交易日、Top-K 和尺度权重控制。
+- 查询三尺度图、历史样本图和未来 12 日图展示。
+- 收益周期切换、统计卡片、直方图和 KDE 曲线。
+- 加载、错误、无结果和数据状态提示。
+
 ## 数据格式
 
 行情文件至少需要以下字段：
@@ -78,6 +87,12 @@ print(validation.valid, validation.reasons)
 
 ```bash
 python3 -m pip install -e .
+```
+
+安装 Web 依赖：
+
+```bash
+python3 -m pip install -e '.[web]'
 ```
 
 当前测试使用 Python 标准库，不需要安装 pytest：
@@ -119,3 +134,11 @@ python3 -m kline_retrieval \
 阶段三的 ColProj 和检索规则见 `docs/retrieval.md`。
 
 阶段四的收益公式和统计输出见 `docs/analytics.md`。
+
+## 启动检索网站
+
+```bash
+python3 -m kline_retrieval.server
+```
+
+启动后访问 `http://127.0.0.1:8000`。默认使用 `data/demo_market_data.csv`；可通过 `KLINE_DATA_PATH` 指向自己的 CSV 或 Parquet 行情文件。

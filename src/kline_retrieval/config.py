@@ -26,7 +26,7 @@ def _non_negative_float(value: object, name: str) -> float:
 class ProjectConfig:
     """Stable defaults shared by data, chart, retrieval and API layers."""
 
-    data_path: Path = Path("data/sample_market_data.csv")
+    data_path: Path = Path("data/demo_market_data.csv")
     monthly_period: int = 20
     weekly_period: int = 5
     daily_window: int = 12

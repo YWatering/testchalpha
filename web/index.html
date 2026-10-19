@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Pattern Atlas | K 线形态检索</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand-block">
+        <span class="brand-mark">PA</span>
+        <div>
+          <div class="brand-name">Pattern Atlas</div>
+          <div class="brand-subtitle">多尺度 K 线形态检索</div>
+        </div>
+      </div>
+      <div class="runtime-status"><span class="status-dot"></span><span id="health-label">连接中</span></div>
+    </header>
+
+    <main class="app-shell">
+      <section class="query-panel panel">
+        <div class="section-heading">
+          <div>
+            <p class="eyebrow">RETRIEVAL WORKSPACE</p>
+            <h1>查找历史上最像的形态</h1>
+          </div>
+          <div class="data-chip" id="data-chip">加载数据中</div>
+        </div>
+        <form id="search-form" class="query-form">
+          <label class="field field-symbol">
+            <span>股票</span>
+            <select id="symbol-input" required></select>
+          </label>
+          <label class="field field-date">
+            <span>交易日</span>
+            <input id="date-input" type="date" required />
+          </label>
+          <label class="field field-model">
+            <span>模型</span>
+            <select id="model-input">
+              <option value="colproj">ColProj · 36D</option>
+              <option value="cnn" disabled>CNN · 阶段 7</option>
+            </select>
+          </label>
+          <label class="field field-topk">
+            <span>Top-K</span>
+            <input id="topk-input" type="number" min="1" max="100" value="20" />
+          </label>
+          <button class="primary-button" type="submit" id="search-button">开始检索 <span>→</span></button>
+        </form>
+        <div class="weight-controls">
+          <div class="control-label">尺度权重</div>
+          <label class="range-field">
+            <span>月线 <output id="month-weight-value">1.00</output></span>
+            <input id="month-weight" type="range" min="0" max="3" step="0.25" value="1" />
+          </label>
+          <label class="range-field">
+            <span>周线 <output id="week-weight-value">1.00</output></span>
+            <input id="week-weight" type="range" min="0" max="3" step="0.25" value="1" />
+          </label>
+          <div class="fixed-weight"><span>日线</span><strong>1.00</strong><small>固定</small></div>
+          <label class="embargo-field">
+            <span>同股间隔</span>
+            <input id="embargo-input" type="number" min="0" max="100" value="3" />
+            <small>交易日</small>
+          </label>
+        </div>
+      </section>
+
+      <div class="notice" id="notice" role="status">选择样本后执行检索。</div>
+
+      <section class="query-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">QUERY SAMPLE</p>
+            <h2 id="query-title">当前样本</h2>
+          </div>
+          <div class="query-meta" id="query-meta">等待查询</div>
+        </div>
+        <div class="query-chart-grid" id="query-charts">
+          <div class="empty-state">执行一次检索后显示三种尺度的查询图。</div>
+        </div>
+      </section>
+
+      <section class="analysis-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">FORWARD OUTCOMES</p>
+            <h2>历史相似样本之后发生了什么</h2>
+          </div>
+          <label class="horizon-switcher">收益周期
+            <select id="horizon-input"></select>
+          </label>
+        </div>
+        <div class="stats-grid" id="stats-grid">
+          <div class="stat-card"><span>平均收益</span><strong>—</strong></div>
+          <div class="stat-card"><span>中位数</span><strong>—</strong></div>
+          <div class="stat-card"><span>胜率</span><strong>—</strong></div>
+          <div class="stat-card"><span>样本数</span><strong>—</strong></div>
+        </div>
+        <div class="distribution-panel panel">
+          <div class="chart-title-row"><h3>收益分布</h3><span id="distribution-caption">执行检索后显示</span></div>
+          <div class="distribution-chart" id="distribution-chart"><div class="empty-state">暂无分布数据</div></div>
+        </div>
+      </section>
+
+      <section class="results-section">
+        <div class="section-heading compact-heading">
+          <div>
+            <p class="eyebrow">SIMILAR HISTORY</p>
+            <h2>相似样本排名</h2>
+          </div>
+          <div class="result-count" id="result-count">0 个样本</div>
+        </div>
+        <div class="results-table-wrap panel">
+          <table class="results-table">
+            <thead>
+              <tr>
+                <th>排名</th>
+                <th>样本</th>
+                <th>距离</th>
+                <th>未来 1D</th>
+                <th>未来 5D</th>
+                <th>未来 12D</th>
+                <th>未来 21D</th>
+              </tr>
+            </thead>
+            <tbody id="results-table-body">
+              <tr><td colspan="7" class="table-empty">执行检索后显示相似样本。</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="result-cards" id="result-cards"></div>
+      </section>
+    </main>
+
+    <footer class="footer">Pattern Atlas · 历史形态统计工具 · 结果用于研究，不构成投资建议</footer>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>
