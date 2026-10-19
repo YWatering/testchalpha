@@ -9,6 +9,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from kline_retrieval import (  # noqa: E402
     ColumnProjectionEmbedder,
     MarketData,
+    SampleEmbeddingCache,
     build_sample_embedding,
     build_sample_charts,
     cosine_distance,
@@ -123,6 +124,50 @@ class RetrievalTests(unittest.TestCase):
 
         self.assertEqual(len(results), 3)
         self.assertTrue(all(result.sample.date < latest_date for result in results))
+
+    def test_future_bars_do_not_change_query_embedding(self) -> None:
+        rows = make_rows(count=330)
+        query_date = date(2024, 1, 2) + timedelta(days=280)
+        changed_rows = [dict(row) for row in rows]
+        for row in changed_rows[281:]:
+            row["open"] = float(row["open"]) * 1.8
+            row["high"] = float(row["high"]) * 1.8
+            row["low"] = float(row["low"]) * 1.8
+            row["close"] = float(row["close"]) * 1.8
+
+        original = build_sample_embedding(MarketData.from_rows(rows), "TEST", query_date)
+        altered_future = build_sample_embedding(
+            MarketData.from_rows(changed_rows), "TEST", query_date
+        )
+
+        self.assertEqual(original.embeddings, altered_future.embeddings)
+
+    def test_embedding_cache_reuses_features_and_preserves_ranking(self) -> None:
+        cache = SampleEmbeddingCache(max_items=512)
+        cold_diagnostics: dict[str, int | float] = {}
+        warm_diagnostics: dict[str, int | float] = {}
+        cold = search_market_data(
+            self.data,
+            "TEST",
+            self.query_date,
+            top_k=5,
+            embedding_cache=cache,
+            diagnostics=cold_diagnostics,
+        )
+        warm = search_market_data(
+            self.data,
+            "TEST",
+            self.query_date,
+            top_k=5,
+            embedding_cache=cache,
+            diagnostics=warm_diagnostics,
+        )
+
+        self.assertEqual(cold, warm)
+        self.assertGreater(cold_diagnostics["cache_misses"], 0)
+        self.assertEqual(warm_diagnostics["cache_misses"], 0)
+        self.assertGreater(warm_diagnostics["cache_hits"], 0)
+        self.assertGreaterEqual(warm_diagnostics["candidate_count"], 5)
 
 
 if __name__ == "__main__":

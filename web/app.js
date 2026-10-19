@@ -161,7 +161,8 @@ async function runSearch(event) {
     renderQuery(result.query);
     renderResults(result);
     renderStats(Number($('#horizon-input').value));
-    setNotice(`检索完成，返回 ${result.matches.length} 个历史样本。`, 'success');
+    const perf = result.performance || {};
+    setNotice(`检索完成：${result.matches.length}/${perf.candidate_count ?? '—'} 个候选 · 检索 ${perf.total_ms ?? '—'} ms / 请求 ${perf.request_ms ?? '—'} ms · 缓存命中 ${perf.cache_hits ?? 0}`, 'success');
   } catch (error) {
     setNotice(error.message, 'error');
   } finally {

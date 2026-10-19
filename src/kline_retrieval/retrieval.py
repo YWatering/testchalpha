@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+from collections import OrderedDict
 from dataclasses import dataclass
 from datetime import date
 from math import sqrt
+from time import perf_counter
 from typing import Protocol, Sequence
 
 from .charts import QueryCharts, build_query_charts
@@ -93,6 +95,42 @@ class SimilarityMatch:
     monthly_distance: float
     weekly_distance: float
     daily_distance: float
+
+
+class SampleEmbeddingCache:
+    """Bounded per-dataset LRU cache for historical sample embeddings."""
+
+    def __init__(self, max_items: int = 20_000) -> None:
+        if max_items <= 0:
+            raise ValueError("max_items 必须大于 0")
+        self.max_items = max_items
+        self._items: OrderedDict[tuple[object, ...], RetrievalSample] = OrderedDict()
+
+    def get(
+        self,
+        market_data: MarketData,
+        symbol: str,
+        trading_date: date,
+        config: ProjectConfig,
+        embedder: Embedder | None,
+    ) -> tuple[RetrievalSample, bool]:
+        model = embedder or ColumnProjectionEmbedder()
+        key = (market_data, symbol, trading_date, config, type(model), id(model) if embedder else None)
+        cached = self._items.get(key)
+        if cached is not None:
+            self._items.move_to_end(key)
+            return cached, True
+        sample = build_sample_embedding(
+            market_data,
+            symbol,
+            trading_date,
+            config=config,
+            embedder=model,
+        )
+        self._items[key] = sample
+        if len(self._items) > self.max_items:
+            self._items.popitem(last=False)
+        return sample, False
 
 
 def embed_query_charts(
@@ -217,31 +255,40 @@ def search_market_data(
     week_weight: float = 1.0,
     top_k: int = 20,
     embargo_trading_days: int = 0,
+    embedding_cache: SampleEmbeddingCache | None = None,
+    diagnostics: dict[str, int | float] | None = None,
 ) -> list[SimilarityMatch]:
     """Build valid historical candidates and return their ranked matches."""
 
     if embargo_trading_days < 0:
         raise RetrievalError("embargo_trading_days 不能小于 0")
     parsed_query_date = _as_date(query_date)
-    query = build_sample_embedding(
-        market_data,
-        query_symbol,
-        parsed_query_date,
-        config=config,
-        embedder=embedder,
-    )
+    started = perf_counter()
+    cache_hits = 0
+    cache_misses = 0
+    embed_started = perf_counter()
+    if embedding_cache is None:
+        query = build_sample_embedding(
+            market_data, query_symbol, parsed_query_date, config=config, embedder=embedder
+        )
+    else:
+        query, hit = embedding_cache.get(
+            market_data, query_symbol, parsed_query_date, config, embedder
+        )
+        cache_hits += int(hit)
+        cache_misses += int(not hit)
     candidate_symbols = tuple(symbols) if symbols is not None else market_data.symbols
     candidates: list[RetrievalSample] = []
     history_count = config.monthly_period * config.daily_window
     future_count = max(config.future_horizons)
-    query_index = market_data.dates(query_symbol).index(parsed_query_date)
-
+    query_dates = market_data.dates(query_symbol)
+    query_index = query_dates.index(parsed_query_date)
+    candidate_count = 0
     for symbol in candidate_symbols:
-        for candidate_date in market_data.dates(symbol):
+        for candidate_index, candidate_date in enumerate(market_data.dates(symbol)):
             if candidate_date >= parsed_query_date:
                 continue
             if symbol == query_symbol:
-                candidate_index = market_data.dates(symbol).index(candidate_date)
                 if query_index - candidate_index <= embargo_trading_days:
                     continue
             validation = market_data.validate_sample(
@@ -252,23 +299,42 @@ def search_market_data(
             )
             if not validation.valid:
                 continue
-            candidates.append(
-                build_sample_embedding(
-                    market_data,
-                    symbol,
-                    candidate_date,
-                    config=config,
-                    embedder=embedder,
+            candidate_count += 1
+            if embedding_cache is None:
+                sample = build_sample_embedding(
+                    market_data, symbol, candidate_date, config=config, embedder=embedder
                 )
-            )
+                cache_misses += 1
+            else:
+                sample, hit = embedding_cache.get(
+                    market_data, symbol, candidate_date, config, embedder
+                )
+                cache_hits += int(hit)
+                cache_misses += int(not hit)
+            candidates.append(sample)
 
-    return search_similar_samples(
+    embedding_seconds = perf_counter() - embed_started
+    scoring_started = perf_counter()
+
+    matches = search_similar_samples(
         query,
         candidates,
         month_weight=month_weight,
         week_weight=week_weight,
         top_k=top_k,
     )
+    if diagnostics is not None:
+        diagnostics.update(
+            {
+                "candidate_count": candidate_count,
+                "cache_hits": cache_hits,
+                "cache_misses": cache_misses,
+                "embedding_ms": round(embedding_seconds * 1000, 3),
+                "scoring_ms": round((perf_counter() - scoring_started) * 1000, 3),
+                "total_ms": round((perf_counter() - started) * 1000, 3),
+            }
+        )
+    return matches
 
 
 def _interpolate_empty_columns(values: Sequence[float | None]) -> list[float]:

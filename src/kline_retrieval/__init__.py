@@ -32,6 +32,7 @@ from .charts import (
 )
 from .retrieval import (
     ColumnProjectionEmbedder,
+    SampleEmbeddingCache,
     Embedder,
     RetrievalError,
     RetrievalSample,
@@ -77,6 +78,7 @@ __all__ = [
     "QueryBars",
     "QueryCharts",
     "ColumnProjectionEmbedder",
+    "SampleEmbeddingCache",
     "Embedder",
     "RetrievalError",
     "RetrievalSample",

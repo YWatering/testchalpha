@@ -48,6 +48,26 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(len(payload["matches"]), 3)
         self.assertEqual(set(payload["statistics"]), {"1", "5", "10", "12", "21"})
         self.assertTrue(payload["matches"][0]["future_chart"].startswith("data:image/png;base64,"))
+        self.assertGreater(payload["performance"]["candidate_count"], 3)
+        self.assertIn("scoring_ms", payload["performance"])
+        self.assertGreater(payload["performance"]["request_ms"], 0)
+
+        second = self.client.post(
+            "/api/retrieval/search",
+            json={
+                "symbol": "DEMO",
+                "date": dates[-1],
+                "month_weight": 1.5,
+                "week_weight": 0.5,
+                "top_k": 3,
+                "embargo_trading_days": 3,
+            },
+        ).json()
+        self.assertEqual(
+            [(row["symbol"], row["date"], row["distance"]) for row in payload["matches"]],
+            [(row["symbol"], row["date"], row["distance"]) for row in second["matches"]],
+        )
+        self.assertEqual(second["performance"]["cache_misses"], 0)
 
     def test_search_endpoint_rejects_non_fixed_day_weight(self) -> None:
         response = self.client.post(

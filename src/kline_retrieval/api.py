@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 from datetime import date
 from pathlib import Path
+from time import perf_counter
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
@@ -16,7 +17,7 @@ from .analytics import ReturnAnalysisError, analyze_matches
 from .charts import build_query_charts
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
-from .retrieval import RetrievalError, search_market_data
+from .retrieval import RetrievalError, SampleEmbeddingCache, search_market_data
 
 
 class SearchRequest(BaseModel):
@@ -40,6 +41,7 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
     app.state.config = config
     app.state.market_data = market_data
     app.state.data_path = resolved_data_path
+    app.state.embedding_cache = SampleEmbeddingCache()
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
     @app.get("/", include_in_schema=False)
@@ -84,10 +86,12 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
 
     @app.post("/api/retrieval/search")
     def search(request: SearchRequest) -> dict[str, object]:
+        request_started = perf_counter()
         if request.day_weight != 1.0:
             raise HTTPException(status_code=400, detail="日线权重必须固定为 1.0")
         try:
             query_date = date.fromisoformat(request.date)
+            diagnostics: dict[str, int | float] = {}
             matches = search_market_data(
                 market_data,
                 request.symbol,
@@ -97,6 +101,8 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
                 week_weight=request.week_weight,
                 top_k=request.top_k,
                 embargo_trading_days=request.embargo_trading_days,
+                embedding_cache=app.state.embedding_cache,
+                diagnostics=diagnostics,
             )
             analysis = analyze_matches(market_data, matches, config=config)
             query_charts = build_query_charts(
@@ -125,7 +131,7 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
                 }
             )
 
-        return {
+        response = {
             "query": {
                 "symbol": request.symbol,
                 "date": query_date.isoformat(),
@@ -133,11 +139,14 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
             },
             "parameters": request.model_dump(),
             "matches": match_payload,
+            "performance": diagnostics,
             "statistics": {
                 str(statistic.horizon): statistic.as_dict()
                 for statistic in analysis.statistics
             },
         }
+        diagnostics["request_ms"] = round((perf_counter() - request_started) * 1000, 3)
+        return response
 
     return app
 
