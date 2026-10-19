@@ -95,6 +95,22 @@ class SampleBars:
 
 
 @dataclass(frozen=True, slots=True)
+class QueryBars:
+    """Only the three historical scales used by feature extraction."""
+
+    monthly: tuple[OHLCBar, ...]
+    weekly: tuple[OHLCBar, ...]
+    daily: tuple[OHLCBar, ...]
+
+    def as_dict(self) -> dict[str, tuple[OHLCBar, ...]]:
+        return {
+            "monthly": self.monthly,
+            "weekly": self.weekly,
+            "daily": self.daily,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SampleCharts:
     """Rendered charts for a query sample."""
 
@@ -109,6 +125,22 @@ class SampleCharts:
             "weekly": self.weekly,
             "daily": self.daily,
             "future_12d": self.future_12d,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class QueryCharts:
+    """Rendered historical charts used for retrieval features."""
+
+    monthly: GrayscaleImage
+    weekly: GrayscaleImage
+    daily: GrayscaleImage
+
+    def as_dict(self) -> dict[str, GrayscaleImage]:
+        return {
+            "monthly": self.monthly,
+            "weekly": self.weekly,
+            "daily": self.daily,
         }
 
 
@@ -162,6 +194,29 @@ def build_sample_bars(
         weekly=aggregate_ohlc(weekly_daily, config.weekly_period),
         daily=aggregate_ohlc(daily_daily, 1),
         future_12d=aggregate_ohlc(future_daily, 1),
+    )
+
+
+def build_query_bars(
+    market_data: MarketData,
+    symbol: str,
+    trading_date: date | str,
+    config: ProjectConfig = DEFAULT_CONFIG,
+) -> QueryBars:
+    """Build only historical bars so retrieval never requires future data."""
+
+    monthly_daily = market_data.get_history(
+        symbol, trading_date, config.monthly_period * config.daily_window
+    )
+    weekly_daily = market_data.get_history(
+        symbol, trading_date, config.weekly_period * config.daily_window
+    )
+    daily_daily = market_data.get_history(symbol, trading_date, config.daily_window)
+
+    return QueryBars(
+        monthly=aggregate_ohlc(monthly_daily, config.monthly_period),
+        weekly=aggregate_ohlc(weekly_daily, config.weekly_period),
+        daily=aggregate_ohlc(daily_daily, 1),
     )
 
 
@@ -227,6 +282,22 @@ def build_sample_charts(
         for name, bars in sample_bars.as_dict().items()
     }
     return SampleCharts(**rendered)
+
+
+def build_query_charts(
+    market_data: MarketData,
+    symbol: str,
+    trading_date: date | str,
+    config: ProjectConfig = DEFAULT_CONFIG,
+) -> QueryCharts:
+    """Build the three historical charts used by the retrieval model."""
+
+    query_bars = build_query_bars(market_data, symbol, trading_date, config)
+    rendered = {
+        name: render_ohlc(bars, config.chart_size)
+        for name, bars in query_bars.as_dict().items()
+    }
+    return QueryCharts(**rendered)
 
 
 def save_sample_charts(
