@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import base64
+import json
 from datetime import date
 from pathlib import Path
 from time import perf_counter
 from typing import Literal
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -50,11 +51,27 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
 
     @app.get("/api/health")
     def health() -> dict[str, object]:
+        manifest_path = resolved_data_path.with_name(
+            f"{resolved_data_path.stem}.manifest.json"
+        )
+        dataset: dict[str, object] = {
+            "provider": "synthetic"
+            if resolved_data_path.name == "demo_market_data.csv"
+            else "local_file"
+        }
+        if manifest_path.is_file():
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                if manifest.get("sha256") == market_data.source_hash:
+                    dataset = manifest
+            except (OSError, json.JSONDecodeError):
+                pass
         return {
             "status": "ok",
             "symbols": len(market_data.symbols),
             "data_path": str(resolved_data_path),
             "source_hash": market_data.source_hash,
+            "dataset": dataset,
         }
 
     @app.get("/api/symbols")
@@ -160,4 +177,24 @@ def _encode_image(image: object) -> str:
     return f"data:image/png;base64,{encoded}"
 
 
-app = create_app()
+class ConfiguredDataApp:
+    """Load the configured local dataset lazily and report setup errors via HTTP."""
+
+    def __init__(self) -> None:
+        self._app: FastAPI | None = None
+
+    async def __call__(self, scope: dict[str, object], receive: object, send: object) -> None:
+        if self._app is None:
+            try:
+                self._app = create_app()
+            except MarketDataError as exc:
+                response = JSONResponse(
+                    status_code=503,
+                    content={"detail": f"无法加载配置的行情数据: {exc}"},
+                )
+                await response(scope, receive, send)
+                return
+        await self._app(scope, receive, send)
+
+
+app = ConfiguredDataApp()

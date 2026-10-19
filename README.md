@@ -2,9 +2,7 @@
 
 ## 当前阶段
 
-项目阶段 0 至阶段 5 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析和检索网站。
-
-当前阶段 6 计划接入 AKShare，下载真实 A 股历史行情并构建本地演示数据集。当前网站尚未内置联网行情下载器，默认仍使用合成演示行情；接入完成前，可通过 `KLINE_DATA_PATH` 加载已有的标准 CSV/Parquet 文件。原阶段 6 的验证与性能优化调整为阶段 7；现有验证框架和合成数据基线已完成，待真实数据接入后复验。阶段 8 起再接入 CNN、规模化索引和回测。
+阶段 0 至阶段 6 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站，以及 AKShare A 股历史数据接入。阶段 7 正在进行真实行情回归与性能复核；阶段 8 起再接入 CNN、规模化索引和回测。
 
 阶段 0 交付内容：
 
@@ -55,13 +53,41 @@
 - 收益周期切换、统计卡片、直方图和 KDE 曲线。
 - 加载、错误、无结果和数据状态提示。
 
-阶段 7 已具备的验证基础（当前仍待真实 A 股行情复验）：
+阶段 7 验证基础与当前真实行情结果：
 
 - API 进程内使用容量受限的 LRU 缓存复用样本向量，缓存与数据集实例隔离。
 - 每次检索响应提供候选样本数、向量缓存命中/未命中、特征构建耗时、排序耗时和总耗时。
 - 页面展示本次检索候选规模、总耗时和缓存命中数。
 - 增加未来行情变更不影响查询向量的防泄漏测试，以及缓存前后排序一致性测试。
 - 增加冷启动/热缓存性能基线命令：`python3 scripts/benchmark_retrieval.py`。
+- 新浪 AKShare 端点真实数据快照：3 只股票、6,288 条日线、5,508 个有效检索样本；真实数据冷/热检索基准见 [阶段 7 验证报告](docs/validation-stage-7.md)。
+
+## 下载真实 A 股数据
+
+AKShare 下载器是可选功能，需要 Python 3.11 或更高版本。核心检索仍可在 Python 3.10 运行。
+
+```bash
+python3.12 -m venv .venv
+.venv/bin/python -m pip install -e '.[web,a-share]'
+NO_PROXY=.sina.com.cn no_proxy=.sina.com.cn .venv/bin/kline-download-a-share \
+  --endpoint sina \
+  --symbols 000001,600519,300750 \
+  --start-date 2018-01-01 \
+  --adjust qfq
+```
+
+若本机代理拦截 Sina 请求，可在 macOS/Linux 对该命令显式直连 Sina 域名：`NO_PROXY=.sina.com.cn no_proxy=.sina.com.cn`。Eastmoney 是默认端点；如果本地代理允许访问，也可省略 `--endpoint sina` 使用默认 Eastmoney。
+
+默认写入 `data/processed/a_share_daily.csv`，旁边会生成包含来源、AKShare 版本、复权方式、日期范围和 SHA-256 的 manifest。默认执行增量更新并重抓末尾若干天以吸收近期修订；完整重建加 `--full-refresh`。真实行情目录已加入 `.gitignore`，不会随项目推送。
+
+用下载的数据启动网页：
+
+```bash
+KLINE_DATA_PATH=data/processed/a_share_daily.csv \
+  .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
+```
+
+访问 `http://127.0.0.1:8001`。页面数据标记显示行情来源和复权方式，悬停可查看覆盖日期与数据哈希。该下载器获取的是历史日线数据，不提供实时行情。阶段 6 本地已用 AKShare Sina 端点完成真实网页检索；默认 Eastmoney 端点仍受当前机器代理网络影响，详见 [数据接入说明](docs/a-share-data.md)。
 
 ## 数据格式
 

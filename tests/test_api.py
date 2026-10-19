@@ -1,13 +1,18 @@
 import sys
+import hashlib
+import json
+import shutil
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from kline_retrieval.api import create_app  # noqa: E402
+from kline_retrieval.api import app as configured_app, create_app  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
@@ -19,6 +24,7 @@ class ApiTests(unittest.TestCase):
         health = self.client.get("/api/health")
         self.assertEqual(health.status_code, 200)
         self.assertEqual(health.json()["status"], "ok")
+        self.assertEqual(health.json()["dataset"]["provider"], "synthetic")
 
         symbols = self.client.get("/api/symbols")
         self.assertEqual(symbols.status_code, 200)
@@ -27,6 +33,30 @@ class ApiTests(unittest.TestCase):
         dates = self.client.get("/api/dates", params={"symbol": "DEMO"})
         self.assertEqual(dates.status_code, 200)
         self.assertEqual(len(dates.json()["dates"]), 360)
+
+    def test_health_reports_valid_dataset_manifest(self) -> None:
+        with TemporaryDirectory() as directory:
+            data_path = Path(directory) / "a_share.csv"
+            shutil.copyfile(ROOT / "data" / "demo_market_data.csv", data_path)
+            digest = hashlib.sha256(data_path.read_bytes()).hexdigest()
+            data_path.with_name("a_share.manifest.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "akshare",
+                        "adjust": "qfq",
+                        "data_start_date": "2023-01-01",
+                        "data_end_date": "2024-01-01",
+                        "sha256": digest,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            client = TestClient(create_app(data_path))
+
+            dataset = client.get("/api/health").json()["dataset"]
+
+        self.assertEqual(dataset["provider"], "akshare")
+        self.assertEqual(dataset["adjust"], "qfq")
 
     def test_search_endpoint_returns_charts_matches_and_statistics(self) -> None:
         dates = self.client.get("/api/dates", params={"symbol": "DEMO"}).json()["dates"]
@@ -84,6 +114,15 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/")
         self.assertEqual(response.status_code, 200)
         self.assertIn("Pattern Atlas", response.text)
+
+    def test_missing_configured_dataset_returns_service_unavailable(self) -> None:
+        with TemporaryDirectory() as directory:
+            missing_data_path = Path(directory) / "not-downloaded.csv"
+            with patch.dict("os.environ", {"KLINE_DATA_PATH": str(missing_data_path)}):
+                response = TestClient(configured_app).get("/api/health")
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("无法加载配置的行情数据", response.json()["detail"])
 
 
 if __name__ == "__main__":

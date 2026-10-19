@@ -124,7 +124,14 @@ async function bootstrap() {
     const [health, symbols, config] = await Promise.all([api('/api/health'), api('/api/symbols'), api('/api/retrieval/config')]);
     $('#health-label').textContent = '数据服务在线';
     $('.status-dot').classList.add('online');
-    $('#data-chip').textContent = `${health.symbols} 个股票 · ColProj`;
+    const dataset = health.dataset || {};
+    const endpointName = dataset.endpoint === 'sina' ? 'Sina' : dataset.endpoint === 'eastmoney' ? 'Eastmoney' : '';
+    const sourceName = dataset.provider === 'akshare' ? `AKShare${endpointName ? ` · ${endpointName}` : ''}` : dataset.provider === 'synthetic' ? '合成演示' : '本地文件';
+    const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
+    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}`;
+    $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
+      ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
+      : `数据文件 SHA-256 ${health.source_hash}`;
     state.horizons = config.future_horizons || state.horizons;
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
     const symbolInput = $('#symbol-input');
