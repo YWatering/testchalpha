@@ -10,6 +10,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import math
+import sqlite3
 from bisect import bisect_left
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -251,9 +252,67 @@ class MarketData:
         suffix = file_path.suffix.lower()
         if suffix == ".csv":
             return cls.from_csv(file_path)
+        if suffix in {".sqlite", ".sqlite3", ".db"}:
+            return cls.from_sqlite(file_path)
         if suffix in {".parquet", ".pq"}:
             return cls.from_parquet(file_path)
         raise MarketDataError(f"不支持的行情文件格式: {file_path.suffix or '<无扩展名>'}")
+
+    @classmethod
+    def from_sqlite(
+        cls,
+        path: str | Path,
+        symbols: Sequence[str] | None = None,
+    ) -> "MarketData":
+        """Load a validated daily-bar snapshot from SQLite."""
+
+        file_path = Path(path)
+        if not file_path.is_file():
+            raise MarketDataError(f"行情数据库不存在: {file_path}")
+        try:
+            with sqlite3.connect(file_path) as connection:
+                if symbols:
+                    placeholders = ",".join("?" for _ in symbols)
+                    rows = connection.execute(
+                        f"""
+                        SELECT symbol, date, open, high, low, close, volume
+                        FROM daily_bars
+                        WHERE symbol IN ({placeholders})
+                        ORDER BY symbol, date
+                        """,
+                        tuple(symbols),
+                    ).fetchall()
+                else:
+                    rows = connection.execute(
+                        """
+                        SELECT symbol, date, open, high, low, close, volume
+                        FROM daily_bars
+                        ORDER BY symbol, date
+                        """
+                    ).fetchall()
+                metadata = dict(
+                    connection.execute("SELECT key, value FROM dataset_meta").fetchall()
+                )
+        except sqlite3.Error as exc:
+            raise MarketDataError(f"读取行情数据库失败: {file_path}") from exc
+        if not rows:
+            raise DataValidationError("行情数据库没有 daily_bars 数据")
+        return cls.from_rows(
+            (
+                {
+                    "symbol": row[0],
+                    "date": row[1],
+                    "open": row[2],
+                    "high": row[3],
+                    "low": row[4],
+                    "close": row[5],
+                    "volume": row[6],
+                }
+                for row in rows
+            ),
+            source_path=str(file_path),
+            source_hash=metadata.get("source_hash"),
+        )
 
     @property
     def symbols(self) -> tuple[str, ...]:

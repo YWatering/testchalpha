@@ -15,11 +15,19 @@ from kline_retrieval.data_provider import (  # noqa: E402
     DataProviderError,
 )
 from kline_retrieval.data_sync import (  # noqa: E402
+    DEFAULT_A_SHARE_SYMBOLS,
     DataSyncError,
     normalize_provider_rows,
     sync_a_share_daily,
 )
 from kline_retrieval.market_data import MarketData  # noqa: E402
+from kline_retrieval.sqlite_store import (  # noqa: E402
+    clear_checkpoint,
+    load_checkpoint,
+    read_metadata,
+    stage_symbol,
+    write_snapshot,
+)
 
 
 def ak_row(day: str, close: float = 10.0) -> dict[str, object]:
@@ -48,6 +56,75 @@ class FakeProvider:
 
 
 class DataSyncTests(unittest.TestCase):
+    def test_default_a_share_pool_covers_nine_symbols(self) -> None:
+        self.assertEqual(len(DEFAULT_A_SHARE_SYMBOLS), 9)
+        self.assertEqual(len(set(DEFAULT_A_SHARE_SYMBOLS)), 9)
+
+    def test_sqlite_snapshot_is_readable_after_transactional_write(self) -> None:
+        rows = [
+            {
+                "symbol": "000001",
+                "date": "2024-01-02",
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "volume": 1000,
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            write_snapshot(
+                database,
+                rows,
+                source_hash="snapshot-1",
+                manifest={"provider": "test"},
+            )
+            loaded = MarketData.from_sqlite(database)
+            metadata = read_metadata(database)
+
+        self.assertEqual(loaded.symbols, ("000001",))
+        self.assertEqual(loaded.source_hash, "snapshot-1")
+        self.assertEqual(metadata["manifest"], '{"provider": "test"}')
+
+    def test_sqlite_failed_snapshot_keeps_previous_committed_data(self) -> None:
+        first = {
+            "symbol": "000001",
+            "date": "2024-01-02",
+            "open": 10.0,
+            "high": 10.5,
+            "low": 9.8,
+            "close": 10.2,
+            "volume": 1000,
+        }
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            write_snapshot(database, [first], source_hash="snapshot-1", manifest={})
+            with self.assertRaises(OSError):
+                write_snapshot(
+                    database,
+                    [first, first],
+                    source_hash="snapshot-2",
+                    manifest={},
+                )
+            loaded = MarketData.from_sqlite(database)
+
+        self.assertEqual(loaded.source_hash, "snapshot-1")
+        self.assertEqual(loaded.get_bar("000001", "2024-01-02").close, 10.2)
+
+    def test_sqlite_sync_checkpoint_can_resume_and_clear(self) -> None:
+        rows = normalize_provider_rows("000001", [ak_row("2024-01-02")])
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            stage_symbol(database, "run-1", "000001", rows)
+            completed, staged_rows = load_checkpoint(database, "run-1")
+            clear_checkpoint(database, "run-1")
+            cleared, _ = load_checkpoint(database, "run-1")
+
+        self.assertEqual(completed, {"000001"})
+        self.assertEqual(staged_rows[0]["date"], "2024-01-02")
+        self.assertEqual(cleared, set())
+
     def test_akshare_adapter_calls_daily_endpoint_and_maps_records(self) -> None:
         calls = []
 
@@ -105,10 +182,48 @@ class DataSyncTests(unittest.TestCase):
         normalized = normalize_provider_rows("000001", records)
         self.assertEqual(normalized[0]["date"], "2024-01-02")
 
+    def test_akshare_sina_endpoint_routes_beijing_symbol(self) -> None:
+        calls = []
+
+        class Frame:
+            empty = True
+
+        def fetcher(**kwargs):
+            calls.append(kwargs)
+            return Frame()
+
+        with patch.object(sys, "version_info", (3, 12, 0)):
+            provider = AKShareProvider(fetcher=fetcher, endpoint="sina")
+        provider.fetch_daily("920001", date(2024, 1, 1), date(2024, 1, 31), "")
+
+        self.assertEqual(calls[0]["symbol"], "bj920001")
+
     def test_akshare_adapter_reports_runtime_requirement(self) -> None:
         with patch.object(sys, "version_info", (3, 10, 4)):
             with self.assertRaisesRegex(DataProviderError, "Python 3.11"):
                 AKShareProvider(fetcher=lambda **_: [])
+
+    def test_akshare_universe_normalizes_listed_market_metadata(self) -> None:
+        class Frame:
+            def to_dict(self, orient):
+                return [
+                    {"code": "688001", "name": "科创样例"},
+                    {"code": 920001, "name": "北交样例"},
+                    {"code": "000001", "name": "深市样例"},
+                    {"name": "缺少代码"},
+                    {"code": "000002", "name": ""},
+                ]
+
+        with patch.object(sys, "version_info", (3, 12, 0)):
+            provider = AKShareProvider(
+                fetcher=lambda **_: [],
+                universe_fetcher=lambda: Frame(),
+            )
+        universe = provider.list_a_share_universe()
+
+        self.assertEqual([item["symbol"] for item in universe], ["000001", "688001", "920001"])
+        self.assertEqual(universe[1]["board"], "STAR")
+        self.assertEqual(universe[2]["exchange"], "BSE")
 
     def test_sync_writes_validated_csv_and_manifest(self) -> None:
         provider = FakeProvider(
@@ -234,6 +349,41 @@ class DataSyncTests(unittest.TestCase):
                     Path(directory) / "empty.csv",
                     sleep=lambda _: None,
                 )
+
+    def test_full_market_sync_isolates_a_failed_symbol(self) -> None:
+        class PartialProvider(FakeProvider):
+            def fetch_daily(self, symbol, start_date, end_date, adjust):
+                if symbol == "000002":
+                    raise DataProviderError("temporary source failure")
+                return super().fetch_daily(symbol, start_date, end_date, adjust)
+
+        provider = PartialProvider(
+            {
+                "000001": [ak_row("2024-01-02")],
+                "000002": [],
+            }
+        )
+        with TemporaryDirectory() as directory:
+            output = Path(directory) / "partial.csv"
+            database = Path(directory) / "partial.sqlite3"
+            result = sync_a_share_daily(
+                provider,
+                ["000001", "000002"],
+                date(2024, 1, 1),
+                date(2024, 1, 31),
+                output,
+                database_path=database,
+                continue_on_error=True,
+                retries=1,
+                sleep=lambda _: None,
+            )
+
+            manifest = json.loads(result.manifest_path.read_text(encoding="utf-8"))
+            loaded = MarketData.from_sqlite(database)
+
+        self.assertEqual(result.failed_symbols, ("000002",))
+        self.assertEqual(manifest["failed_symbols"], ["000002"])
+        self.assertEqual(loaded.symbols, ("000001",))
 
 
 if __name__ == "__main__":

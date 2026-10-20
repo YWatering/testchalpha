@@ -13,6 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from kline_retrieval.api import app as configured_app, create_app  # noqa: E402
+from kline_retrieval.sqlite_store import write_snapshot  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
@@ -57,6 +58,33 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(dataset["provider"], "akshare")
         self.assertEqual(dataset["adjust"], "qfq")
+
+    def test_sqlite_dataset_reload_is_visible_without_restarting_app(self) -> None:
+        rows = [
+            {
+                "symbol": "000001",
+                "date": "2024-01-02",
+                "open": 10.0,
+                "high": 10.5,
+                "low": 9.8,
+                "close": 10.2,
+                "volume": 1000,
+            }
+        ]
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            write_snapshot(database, rows, source_hash="snapshot-1", manifest={})
+            client = TestClient(create_app(database))
+            first = client.get("/api/health").json()
+
+            rows[0]["close"] = 10.8
+            rows[0]["high"] = 11.0
+            write_snapshot(database, rows, source_hash="snapshot-2", manifest={})
+            second = client.get("/api/health").json()
+
+        self.assertEqual(first["storage"], "sqlite")
+        self.assertEqual(first["source_hash"], "snapshot-1")
+        self.assertEqual(second["source_hash"], "snapshot-2")
 
     def test_search_endpoint_returns_charts_matches_and_statistics(self) -> None:
         dates = self.client.get("/api/dates", params={"symbol": "DEMO"}).json()["dates"]

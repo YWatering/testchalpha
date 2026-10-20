@@ -15,6 +15,7 @@ from typing import Callable, Iterable, Sequence
 
 from .data_provider import DataProviderError, MarketDataProvider
 from .market_data import DataValidationError, MarketData
+from .sqlite_store import clear_checkpoint, load_checkpoint, stage_symbol, write_snapshot
 
 
 CSV_FIELDS = ("symbol", "date", "open", "high", "low", "close", "volume")
@@ -34,7 +35,28 @@ SINA_PROVIDER_FIELDS = {
     "close": "close",
     "volume": "volume",
 }
-DEFAULT_A_SHARE_SYMBOLS = ("000001", "600519", "300750")
+DEFAULT_A_SHARE_SYMBOLS = (
+    "000001",  # 平安银行
+    "600519",  # 贵州茅台
+    "300750",  # 宁德时代
+    "000333",  # 美的集团
+    "002594",  # 比亚迪
+    "300059",  # 东方财富
+    "600276",  # 恒瑞医药
+    "600900",  # 长江电力
+    "601318",  # 中国平安
+)
+DEFAULT_A_SHARE_NAMES = {
+    "000001": "平安银行",
+    "600519": "贵州茅台",
+    "300750": "宁德时代",
+    "000333": "美的集团",
+    "002594": "比亚迪",
+    "300059": "东方财富",
+    "600276": "恒瑞医药",
+    "600900": "长江电力",
+    "601318": "中国平安",
+}
 VALID_ADJUSTMENTS = ("", "qfq", "hfq")
 
 
@@ -51,6 +73,7 @@ class DataSyncResult:
     start_date: date
     end_date: date
     source_hash: str
+    failed_symbols: tuple[str, ...] = ()
 
 
 def normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
@@ -58,6 +81,19 @@ def normalize_symbols(symbols: Iterable[str]) -> tuple[str, ...]:
     if not normalized or any(len(symbol) != 6 or not symbol.isdigit() for symbol in normalized):
         raise DataSyncError("A 股代码必须是六位数字，例如 000001,600519,300750")
     return normalized
+
+
+def build_instrument_metadata(symbols: Iterable[str]) -> tuple[dict[str, str], ...]:
+    return tuple(
+        {
+            "symbol": symbol,
+            "name": DEFAULT_A_SHARE_NAMES.get(symbol, symbol),
+            "exchange": _exchange_for_symbol(symbol),
+            "board": _board_for_symbol(symbol),
+            "status": "listed",
+        }
+        for symbol in symbols
+    )
 
 
 def normalize_provider_rows(
@@ -107,6 +143,9 @@ def sync_a_share_daily(
     refresh_overlap_days: int = 7,
     request_delay: float = 0.8,
     retries: int = 3,
+    database_path: str | Path | None = None,
+    continue_on_error: bool = False,
+    instruments: Iterable[dict[str, object]] = (),
     sleep: Callable[[float], None] = time.sleep,
 ) -> DataSyncResult:
     """Fetch and atomically persist a validated, deduplicated daily dataset."""
@@ -148,8 +187,28 @@ def sync_a_share_daily(
             raise DataSyncError(f"无法读取现有行情快照: {exc}") from exc
 
     ranges_by_symbol = _date_ranges(old_rows)
+    run_key = hashlib.sha256(
+        json.dumps(
+            {
+                "provider": provider.name,
+                "endpoint": provider.endpoint,
+                "adjust": adjust or "raw",
+                "symbols": normalized_symbols,
+                "start": start_date.isoformat(),
+                "end": end_date.isoformat(),
+            },
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    completed_symbols: set[str] = set()
     fetched_rows: list[dict[str, object]] = []
+    if database_path is not None:
+        completed_symbols, fetched_rows = load_checkpoint(database_path, run_key)
+    failed_symbols: list[str] = []
+    failure_messages: dict[str, str] = {}
     for symbol_index, symbol in enumerate(normalized_symbols):
+        if symbol in completed_symbols:
+            continue
         fetch_start = start_date
         if incremental and symbol in ranges_by_symbol:
             earliest, latest = ranges_by_symbol[symbol]
@@ -172,10 +231,29 @@ def sync_a_share_daily(
                 if attempt + 1 < retries:
                     sleep(min(2**attempt, 8))
         if last_error is not None:
-            raise DataSyncError(str(last_error)) from last_error
+            if not continue_on_error:
+                raise DataSyncError(str(last_error)) from last_error
+            failed_symbols.append(symbol)
+            failure_messages[symbol] = str(last_error)
+            continue
         if not raw_rows:
-            raise DataSyncError(f"AKShare 未返回 {symbol} 在请求区间内的日线数据")
-        fetched_rows.extend(normalize_provider_rows(symbol, raw_rows))
+            message = f"AKShare 未返回 {symbol} 在请求区间内的日线数据"
+            if not continue_on_error:
+                raise DataSyncError(message)
+            failed_symbols.append(symbol)
+            failure_messages[symbol] = message
+            continue
+        try:
+            normalized_rows = normalize_provider_rows(symbol, raw_rows)
+        except DataSyncError as exc:
+            if not continue_on_error:
+                raise
+            failed_symbols.append(symbol)
+            failure_messages[symbol] = str(exc)
+            continue
+        fetched_rows.extend(normalized_rows)
+        if database_path is not None:
+            stage_symbol(database_path, run_key, symbol, normalized_rows)
         if symbol_index + 1 < len(normalized_symbols) and request_delay:
             sleep(request_delay)
 
@@ -205,11 +283,23 @@ def sync_a_share_daily(
         "fetched_at_utc": datetime.now(timezone.utc).isoformat(),
         "sha256": source_hash,
     }
+    if failed_symbols:
+        manifest["failed_symbols"] = failed_symbols
+        manifest["failure_messages"] = failure_messages
     _atomic_write(data_path, csv_bytes)
     _atomic_write(
         manifest_path,
         (json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"),
     )
+    if database_path is not None:
+        write_snapshot(
+            database_path,
+            merged,
+            source_hash=source_hash,
+            manifest=manifest,
+            instruments=instruments,
+        )
+        clear_checkpoint(database_path, run_key)
     return DataSyncResult(
         data_path=data_path,
         manifest_path=manifest_path,
@@ -218,6 +308,7 @@ def sync_a_share_daily(
         start_date=min(all_dates),
         end_date=max(all_dates),
         source_hash=source_hash,
+        failed_symbols=tuple(failed_symbols),
     )
 
 
@@ -233,6 +324,24 @@ def _normalize_date(value: object) -> date:
         except ValueError:
             continue
     raise ValueError(f"无效日期: {text}")
+
+
+def _exchange_for_symbol(symbol: str) -> str:
+    if symbol.startswith("6"):
+        return "SSE"
+    if symbol.startswith(("4", "8", "9")):
+        return "BSE"
+    return "SZSE"
+
+
+def _board_for_symbol(symbol: str) -> str:
+    if symbol.startswith("688"):
+        return "STAR"
+    if symbol.startswith(("300", "301")):
+        return "CHINEXT"
+    if symbol.startswith(("4", "8", "9")):
+        return "BSE"
+    return "MAIN"
 
 
 def _manifest_path(data_path: Path) -> Path:

@@ -6,6 +6,7 @@ import base64
 import json
 from datetime import date
 from pathlib import Path
+from threading import RLock
 from time import perf_counter
 from typing import Literal
 
@@ -19,6 +20,7 @@ from .charts import build_query_charts
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
 from .retrieval import RetrievalError, SampleEmbeddingCache, search_market_data
+from .sqlite_store import read_instruments, read_metadata
 
 
 class SearchRequest(BaseModel):
@@ -35,22 +37,36 @@ class SearchRequest(BaseModel):
 def create_app(data_path: str | Path | None = None) -> FastAPI:
     config = ProjectConfig.from_env()
     resolved_data_path = Path(data_path or config.data_path)
-    market_data = MarketData.from_file(resolved_data_path)
+    market_data = _load_market_data(resolved_data_path, config)
     web_root = Path(__file__).resolve().parents[2] / "web"
 
     app = FastAPI(title="K-Line Pattern Retrieval", version="0.1.0")
     app.state.config = config
     app.state.market_data = market_data
     app.state.data_path = resolved_data_path
+    app.state.market_data_token = _data_token(resolved_data_path)
     app.state.embedding_cache = SampleEmbeddingCache()
+    app.state.data_reload_lock = RLock()
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
     @app.get("/", include_in_schema=False)
     def index() -> FileResponse:
         return FileResponse(web_root / "index.html")
 
+    def current_market_data() -> MarketData:
+        token = _data_token(resolved_data_path)
+        if token != app.state.market_data_token:
+            with app.state.data_reload_lock:
+                token = _data_token(resolved_data_path)
+                if token != app.state.market_data_token:
+                    app.state.market_data = _load_market_data(resolved_data_path, config)
+                    app.state.market_data_token = token
+                    app.state.embedding_cache = SampleEmbeddingCache()
+        return app.state.market_data
+
     @app.get("/api/health")
     def health() -> dict[str, object]:
+        market_data = current_market_data()
         manifest_path = resolved_data_path.with_name(
             f"{resolved_data_path.stem}.manifest.json"
         )
@@ -59,7 +75,16 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
             if resolved_data_path.name == "demo_market_data.csv"
             else "local_file"
         }
-        if manifest_path.is_file():
+        if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+            try:
+                stored_manifest = read_metadata(resolved_data_path).get("manifest")
+                if stored_manifest:
+                    manifest = json.loads(stored_manifest)
+                    if manifest.get("sha256") == market_data.source_hash:
+                        dataset = manifest
+            except (OSError, json.JSONDecodeError):
+                pass
+        elif manifest_path.is_file():
             try:
                 manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
                 if manifest.get("sha256") == market_data.source_hash:
@@ -71,17 +96,28 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
             "symbols": len(market_data.symbols),
             "data_path": str(resolved_data_path),
             "source_hash": market_data.source_hash,
+            "storage": "sqlite"
+            if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}
+            else "file",
             "dataset": dataset,
         }
 
     @app.get("/api/symbols")
-    def symbols() -> dict[str, list[str]]:
-        return {"symbols": list(market_data.symbols)}
+    def symbols() -> dict[str, object]:
+        loaded_symbols = list(current_market_data().symbols)
+        instruments: list[dict[str, str]] = []
+        if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+            instruments = [
+                item
+                for item in read_instruments(resolved_data_path)
+                if item["symbol"] in loaded_symbols
+            ]
+        return {"symbols": loaded_symbols, "instruments": instruments}
 
     @app.get("/api/dates")
     def dates(symbol: str = Query(min_length=1)) -> dict[str, object]:
         try:
-            available_dates = market_data.dates(symbol)
+            available_dates = current_market_data().dates(symbol)
         except MarketDataError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"symbol": symbol, "dates": [item.isoformat() for item in available_dates]}
@@ -104,6 +140,7 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
     @app.post("/api/retrieval/search")
     def search(request: SearchRequest) -> dict[str, object]:
         request_started = perf_counter()
+        market_data = current_market_data()
         if request.day_weight != 1.0:
             raise HTTPException(status_code=400, detail="日线权重必须固定为 1.0")
         try:
@@ -187,7 +224,7 @@ class ConfiguredDataApp:
         if self._app is None:
             try:
                 self._app = create_app()
-            except MarketDataError as exc:
+            except (MarketDataError, OSError) as exc:
                 response = JSONResponse(
                     status_code=503,
                     content={"detail": f"无法加载配置的行情数据: {exc}"},
@@ -198,3 +235,19 @@ class ConfiguredDataApp:
 
 
 app = ConfiguredDataApp()
+
+
+def _data_token(path: Path) -> tuple[object, ...]:
+    """Return a cheap snapshot token so SQLite updates are visible without restart."""
+
+    if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+        metadata = read_metadata(path)
+        return metadata.get("source_hash", ""), metadata.get("updated_at_utc", "")
+    stat = path.stat()
+    return stat.st_mtime_ns, stat.st_size
+
+
+def _load_market_data(path: Path, config: ProjectConfig) -> MarketData:
+    if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+        return MarketData.from_sqlite(path, symbols=config.active_symbols or None)
+    return MarketData.from_file(path)

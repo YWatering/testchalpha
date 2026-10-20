@@ -8,7 +8,12 @@ from pathlib import Path
 from typing import Sequence
 
 from .data_provider import AKShareProvider, DataProviderError
-from .data_sync import DEFAULT_A_SHARE_SYMBOLS, DataSyncError, sync_a_share_daily
+from .data_sync import (
+    DEFAULT_A_SHARE_SYMBOLS,
+    DataSyncError,
+    build_instrument_metadata,
+    sync_a_share_daily,
+)
 from .market_data import MarketData
 
 
@@ -21,6 +26,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=",".join(DEFAULT_A_SHARE_SYMBOLS),
         help="Comma-separated six-digit A-share codes",
     )
+    parser.add_argument(
+        "--all-listed",
+        action="store_true",
+        help="Discover currently listed Shanghai/Shenzhen/Beijing A shares",
+    )
+    parser.add_argument("--offset", type=int, default=0, help="Skip listed symbols for batching")
+    parser.add_argument("--limit", type=int, help="Maximum listed symbols for this batch")
     parser.add_argument("--start-date", default="2018-01-01", help="YYYY-MM-DD")
     parser.add_argument("--end-date", default=date.today().isoformat(), help="YYYY-MM-DD")
     parser.add_argument("--adjust", choices=("qfq", "hfq", "raw"), default="qfq")
@@ -35,6 +47,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("data/processed/a_share_daily.csv"),
     )
+    parser.add_argument(
+        "--database",
+        type=Path,
+        default=Path("data/processed/a_share_daily.sqlite3"),
+        help="SQLite snapshot path used by the live website",
+    )
     parser.add_argument("--full-refresh", action="store_true")
     parser.add_argument("--request-delay", type=float, default=0.8)
     parser.add_argument("--retries", type=int, default=3)
@@ -47,9 +65,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         start_date = date.fromisoformat(args.start_date)
         end_date = date.fromisoformat(args.end_date)
         provider = AKShareProvider(endpoint=args.endpoint)
+        instruments = provider.list_a_share_universe() if args.all_listed else ()
+        if args.offset < 0 or (args.limit is not None and args.limit <= 0):
+            raise ValueError("--offset 不能为负数，--limit 必须大于 0")
+        if instruments:
+            selected = instruments[args.offset : args.offset + args.limit if args.limit else None]
+            symbols = tuple(item["symbol"] for item in selected)
+        else:
+            symbols = tuple(item.strip() for item in args.symbols.split(","))
+            instruments = build_instrument_metadata(symbols)
         result = sync_a_share_daily(
             provider,
-            (item.strip() for item in args.symbols.split(",")),
+            symbols,
             start_date,
             end_date,
             args.output,
@@ -57,8 +84,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             incremental=not args.full_refresh,
             request_delay=args.request_delay,
             retries=args.retries,
+            database_path=args.database,
+            continue_on_error=args.all_listed,
+            instruments=instruments,
         )
-    except (ValueError, DataProviderError, DataSyncError) as exc:
+    except (ValueError, DataProviderError, DataSyncError, OSError) as exc:
         print(f"A 股数据同步失败: {exc}")
         return 2
 
@@ -69,6 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(f"rows: {result.row_count}")
     print(f"date_range: {result.start_date} .. {result.end_date}")
     print(f"sha256: {result.source_hash}")
+    print(f"failed_symbols: {len(result.failed_symbols)}")
     market_data = MarketData.from_file(result.data_path)
     queryable = sum(
         market_data.validate_sample(symbol, trading_day).valid

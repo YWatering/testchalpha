@@ -1,4 +1,4 @@
-const state = { result: null, horizons: [1, 5, 10, 12, 21] };
+const state = { result: null, horizons: [1, 5, 10, 12, 21], sourceHash: null };
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({
@@ -125,17 +125,23 @@ async function bootstrap() {
     $('#health-label').textContent = '数据服务在线';
     $('.status-dot').classList.add('online');
     const dataset = health.dataset || {};
+    state.sourceHash = health.source_hash;
     const endpointName = dataset.endpoint === 'sina' ? 'Sina' : dataset.endpoint === 'eastmoney' ? 'Eastmoney' : '';
     const sourceName = dataset.provider === 'akshare' ? `AKShare${endpointName ? ` · ${endpointName}` : ''}` : dataset.provider === 'synthetic' ? '合成演示' : '本地文件';
     const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
-    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}`;
+    const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
+    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}${storageName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;
     state.horizons = config.future_horizons || state.horizons;
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
     const symbolInput = $('#symbol-input');
-    symbolInput.innerHTML = symbols.symbols.map((symbol) => `<option value="${escapeHtml(symbol)}">${escapeHtml(symbol)}</option>`).join('');
+    const names = Object.fromEntries((symbols.instruments || []).map((item) => [item.symbol, item.name]));
+    symbolInput.innerHTML = symbols.symbols.map((symbol) => {
+      const label = names[symbol] ? `${symbol} · ${names[symbol]}` : symbol;
+      return `<option value="${escapeHtml(symbol)}">${escapeHtml(label)}</option>`;
+    }).join('');
     await loadDates(symbolInput.value);
     setNotice('选择参数后执行检索。');
   } catch (error) {
@@ -185,3 +191,11 @@ $('#horizon-input').addEventListener('change', () => renderStats(Number($('#hori
 $('#search-form').addEventListener('submit', runSearch);
 updateWeights();
 bootstrap();
+setInterval(async () => {
+  try {
+    const health = await api('/api/health');
+    if (state.sourceHash && health.source_hash !== state.sourceHash) window.location.reload();
+  } catch (_) {
+    // The normal health state already reports persistent service failures.
+  }
+}, 60000);

@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 6 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站，以及 AKShare A 股历史数据接入。阶段 7 正在进行真实行情回归与性能复核；阶段 8 起再接入 CNN、规模化索引和回测。
+阶段 0 至阶段 7 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站、AKShare A 股历史数据接入，以及 SQLite 行情数据库和自动刷新。阶段 8 进行数据库真实行情回归与性能复核；阶段 9 起再接入 CNN、规模化索引和回测。
 
 阶段 0 交付内容：
 
@@ -53,14 +53,14 @@
 - 收益周期切换、统计卡片、直方图和 KDE 曲线。
 - 加载、错误、无结果和数据状态提示。
 
-阶段 7 验证基础与当前真实行情结果：
+阶段 8 验证基础与当前真实行情结果：
 
 - API 进程内使用容量受限的 LRU 缓存复用样本向量，缓存与数据集实例隔离。
 - 每次检索响应提供候选样本数、向量缓存命中/未命中、特征构建耗时、排序耗时和总耗时。
 - 页面展示本次检索候选规模、总耗时和缓存命中数。
 - 增加未来行情变更不影响查询向量的防泄漏测试，以及缓存前后排序一致性测试。
 - 增加冷启动/热缓存性能基线命令：`python3 scripts/benchmark_retrieval.py`。
-- 新浪 AKShare 端点真实数据快照：3 只股票、6,288 条日线、5,508 个有效检索样本；真实数据冷/热检索基准见 [阶段 7 验证报告](docs/validation-stage-7.md)。
+- 当前本地 SQLite 快照：9 只股票、19,023 条日线、16,683 个有效检索样本。历史性能基准见 [验证报告](docs/validation-stage-7.md)。
 
 ## 下载真实 A 股数据
 
@@ -71,23 +71,41 @@ python3.12 -m venv .venv
 .venv/bin/python -m pip install -e '.[web,a-share]'
 NO_PROXY=.sina.com.cn no_proxy=.sina.com.cn .venv/bin/kline-download-a-share \
   --endpoint sina \
-  --symbols 000001,600519,300750 \
+  --symbols 000001,600519,300750,000333,002594,300059,600276,600900,601318 \
   --start-date 2018-01-01 \
   --adjust qfq
 ```
 
 若本机代理拦截 Sina 请求，可在 macOS/Linux 对该命令显式直连 Sina 域名：`NO_PROXY=.sina.com.cn no_proxy=.sina.com.cn`。Eastmoney 是默认端点；如果本地代理允许访问，也可省略 `--endpoint sina` 使用默认 Eastmoney。
 
-默认写入 `data/processed/a_share_daily.csv`，旁边会生成包含来源、AKShare 版本、复权方式、日期范围和 SHA-256 的 manifest。默认执行增量更新并重抓末尾若干天以吸收近期修订；完整重建加 `--full-refresh`。真实行情目录已加入 `.gitignore`，不会随项目推送。
+默认股票池为 9 只多行业 A 股。下载命令同时生成标准 CSV、manifest 和 `data/processed/a_share_daily.sqlite3`。SQLite 使用 WAL 和事务快照；默认执行增量更新并重抓末尾若干天，完整重建加 `--full-refresh`。真实行情目录已加入 `.gitignore`，不会随项目推送。
+
+持续自动刷新日线数据库：
+
+```bash
+NO_PROXY=.sina.com.cn no_proxy=.sina.com.cn .venv/bin/kline-refresh-a-share \
+  --endpoint sina --watch --interval-seconds 3600
+```
+
+自动发现当前上市沪深京 A 股并分批建立全市场数据库：
+
+```bash
+NO_PROXY=.sina.com.cn,.sse.com.cn,.szse.cn,.bse.cn \
+no_proxy=.sina.com.cn,.sse.com.cn,.szse.cn,.bse.cn \
+  .venv/bin/kline-refresh-a-share --endpoint sina --all-listed \
+  --offset 0 --limit 200
+```
+
+使用 `--offset 200 --limit 200` 继续下一批。成功股票会保存断点，单股失败会记录到 manifest，不会让整个批次失败。全市场数据库可通过 `KLINE_ACTIVE_SYMBOLS` 限制网页当前加载的检索股票池，避免阶段 10 建立向量索引前进行超大规模内存扫描。
 
 用下载的数据启动网页：
 
 ```bash
-KLINE_DATA_PATH=data/processed/a_share_daily.csv \
+KLINE_DATA_PATH=data/processed/a_share_daily.sqlite3 \
   .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
 ```
 
-访问 `http://127.0.0.1:8001`。页面数据标记显示行情来源和复权方式，悬停可查看覆盖日期与数据哈希。该下载器获取的是历史日线数据，不提供实时行情。阶段 6 本地已用 AKShare Sina 端点完成真实网页检索；默认 Eastmoney 端点仍受当前机器代理网络影响，详见 [数据接入说明](docs/a-share-data.md)。
+访问 `http://127.0.0.1:8001`。数据库提交新快照后 API 自动重载并清空旧向量缓存，浏览器每分钟检查数据版本。这里的“自动刷新”是交易日行情更新，不是逐笔或毫秒级盘中实时行情。默认 Eastmoney 端点仍受当前机器代理网络影响，详见 [数据接入说明](docs/a-share-data.md)。
 
 ## 数据格式
 

@@ -38,9 +38,11 @@ class ProjectConfig:
     week_weight: float = 1.0
     day_weight: float = 1.0
     default_top_k: int = 20
+    active_symbols: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data_path", Path(self.data_path))
+        object.__setattr__(self, "active_symbols", tuple(self.active_symbols))
         _positive_int(self.monthly_period, "monthly_period")
         _positive_int(self.weekly_period, "weekly_period")
         _positive_int(self.daily_window, "daily_window")
@@ -79,6 +81,11 @@ class ProjectConfig:
             week_weight=float(env.get("KLINE_WEEK_WEIGHT", defaults.week_weight)),
             day_weight=float(env.get("KLINE_DAY_WEIGHT", defaults.day_weight)),
             default_top_k=int(env.get("KLINE_DEFAULT_TOP_K", defaults.default_top_k)),
+            active_symbols=tuple(
+                symbol.strip()
+                for symbol in env.get("KLINE_ACTIVE_SYMBOLS", "").split(",")
+                if symbol.strip()
+            ),
         )
 
     @property

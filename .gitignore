@@ -8,3 +8,5 @@ venv/
 .DS_Store
 data/raw/
 data/processed/
+*.sqlite3-shm
+*.sqlite3-wal
