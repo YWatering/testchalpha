@@ -145,7 +145,7 @@ async function bootstrap() {
     const names = Object.fromEntries((symbols.instruments || []).map((item) => [item.symbol, item.name]));
     symbolInput.innerHTML = symbols.symbols.map((symbol) => {
       const name = names[symbol];
-      const label = name && name !== symbol ? `${symbol} · ${name}` : symbol;
+      const label = name && name !== symbol ? `${symbol}·${name}` : symbol;
       return `<option value="${escapeHtml(symbol)}">${escapeHtml(label)}</option>`;
     }).join('');
     await loadDates(symbolInput.value);

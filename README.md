@@ -156,6 +156,17 @@ symbol,date,open,high,low,close,volume
 
 导入器会校验证券代码、日期、OHLC、成交量、成交金额、昨收盘和日收益率，并在数据库中保留 `volume`、`amount`、`return_rate`、`pre_close` 字段。由于当前 CSMAR 日行情表没有证券名称和行业字段，系统只能记录“由用户提供的数据集声明已剔除 ST 和金融业”，不能仅凭这张日行情表独立复核该筛选条件。
 
+### 同步股票代码和名称
+
+CSMAR 日行情表不包含证券简称，导入后可执行下面的命令，从中国信息披露网证券列表补齐当前数据库中的代码—名称映射：
+
+```bash
+.venv/bin/kline-sync-instrument-names \
+  --database data/processed/csmar_a_share_daily.sqlite3
+```
+
+同步结果写入 SQLite 的 `instruments` 表和 `dataset_meta` 元数据。网页的股票下拉框会显示为 `000333·美的集团` 这样的格式；名称列表未返回的代码会保留代码本身作为兜底，不会影响行情检索。
+
 ## 使用示例
 
 ```python
