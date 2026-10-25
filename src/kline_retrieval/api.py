@@ -20,7 +20,7 @@ from .analytics import ReturnAnalysisError, analyze_matches
 from .charts import build_query_charts
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
-from .offline_index import OfflineFeatureIndex
+from .offline_index import CompositeOfflineFeatureIndex, OfflineFeatureIndex
 from .retrieval import (
     RetrievalError,
     SampleEmbeddingCache,
@@ -28,6 +28,7 @@ from .retrieval import (
     search_market_data,
 )
 from .sqlite_store import read_instruments, read_metadata
+from .universe import coverage_report, read_universe_symbols
 
 
 class SearchRequest(BaseModel):
@@ -106,6 +107,10 @@ def create_app(
                     dataset = manifest
             except (OSError, json.JSONDecodeError):
                 pass
+        try:
+            coverage = coverage_report(resolved_data_path) if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"} else None
+        except (OSError, sqlite3.Error):
+            coverage = None
         return {
             "status": "ok",
             "symbols": len(market_data.symbols),
@@ -116,7 +121,7 @@ def create_app(
             else "file",
             "dataset": dataset,
             "index": {
-                "mode": "offline_colproj" if app.state.offline_index is not None else "request_scan",
+                "mode": _index_mode(app.state.offline_index),
                 "version_id": app.state.offline_index.version_id
                 if app.state.offline_index is not None
                 else None,
@@ -124,19 +129,52 @@ def create_app(
                 if app.state.offline_index is not None
                 else 0,
             },
+            "coverage": coverage,
         }
 
     @app.get("/api/symbols")
-    def symbols() -> dict[str, object]:
+    def symbols(
+        q: str = Query(default=""),
+        exchange: str = Query(default=""),
+        board: str = Query(default=""),
+        watchlist: str = Query(default=""),
+        offset: int = Query(default=0, ge=0),
+        limit: int = Query(default=10_000, ge=1, le=20_000),
+    ) -> dict[str, object]:
         loaded_symbols = list(current_market_data().symbols)
         instruments: list[dict[str, str]] = []
         if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
-            instruments = [
-                item
-                for item in read_instruments(resolved_data_path)
-                if item["symbol"] in loaded_symbols
-            ]
-        return {"symbols": loaded_symbols, "instruments": instruments}
+            try:
+                instruments, total = read_universe_symbols(
+                    resolved_data_path,
+                    loaded_symbols=loaded_symbols,
+                    query=q,
+                    exchange=exchange,
+                    board=board,
+                    watchlist=watchlist.split(","),
+                    offset=offset,
+                    limit=limit,
+                )
+            except (OSError, ValueError, sqlite3.Error):
+                instruments = []
+                total = 0
+            if not instruments and not q and not exchange and not board and not watchlist:
+                instruments = [
+                    item for item in read_instruments(resolved_data_path)
+                    if item["symbol"] in loaded_symbols
+                ][offset : offset + limit]
+                total = len(loaded_symbols)
+        else:
+            instruments = [{"symbol": symbol, "name": symbol} for symbol in loaded_symbols[offset : offset + limit]]
+            total = len(loaded_symbols)
+        instruments = [item for item in instruments if item["symbol"] in loaded_symbols]
+        return {
+            "symbols": [item["symbol"] for item in instruments],
+            "instruments": instruments,
+            "total": total,
+            "offset": offset,
+            "limit": limit,
+        }
 
     @app.get("/api/dates")
     def dates(symbol: str = Query(min_length=1)) -> dict[str, object]:
@@ -145,6 +183,24 @@ def create_app(
         except MarketDataError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"symbol": symbol, "dates": [item.isoformat() for item in available_dates]}
+
+    @app.get("/api/valid-dates")
+    def valid_dates(symbol: str = Query(min_length=1)) -> dict[str, object]:
+        try:
+            available_dates = current_market_data().dates(symbol)
+        except MarketDataError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        history_count = config.monthly_period * config.daily_window
+        future_count = max(config.future_horizons)
+        first = history_count - 1
+        last = len(available_dates) - future_count - 1
+        dates = available_dates[first : last + 1] if last >= first else ()
+        return {
+            "symbol": symbol,
+            "dates": [item.isoformat() for item in dates],
+            "required_history": history_count,
+            "required_future": future_count,
+        }
 
     @app.get("/api/retrieval/config")
     def retrieval_config() -> dict[str, object]:
@@ -160,10 +216,9 @@ def create_app(
             },
             "default_top_k": config.default_top_k,
             "similarity_temperature": config.similarity_temperature,
-            "index_mode": "offline_colproj"
-            if app.state.offline_index is not None
-            else "request_scan",
+            "index_mode": _index_mode(app.state.offline_index),
             "index_path": str(config.index_path) if config.index_path else None,
+            "index_paths": [str(path) for path in _index_paths(config.index_path)],
         }
 
     @app.post("/api/retrieval/search")
@@ -303,10 +358,37 @@ def _load_offline_index(
     market_data: MarketData,
     config: ProjectConfig,
 ) -> OfflineFeatureIndex | None:
-    if index_path is None or not index_path.is_file():
+    paths = _index_paths(index_path)
+    if not paths:
         return None
     try:
-        index = OfflineFeatureIndex(index_path)
+        index = OfflineFeatureIndex(paths[0]) if len(paths) == 1 else CompositeOfflineFeatureIndex(paths)
     except (OSError, ValueError, sqlite3.Error):
         return None
     return index if index.is_compatible(market_data.source_hash, config) else None
+
+
+def _index_paths(index_path: Path | None) -> tuple[Path, ...]:
+    if index_path is None:
+        return ()
+    if index_path.suffix.lower() == ".json":
+        try:
+            manifest = json.loads(index_path.read_text(encoding="utf-8"))
+            paths = manifest.get("indexes", [])
+            return tuple(
+                (index_path.parent / Path(item)).resolve()
+                if not Path(item).is_absolute()
+                else Path(item)
+                for item in paths
+            )
+        except (OSError, json.JSONDecodeError, AttributeError):
+            return ()
+    return tuple(Path(item.strip()) for item in str(index_path).split(",") if item.strip())
+
+
+def _index_mode(index: object | None) -> str:
+    if index is None:
+        return "request_scan"
+    if isinstance(index, CompositeOfflineFeatureIndex):
+        return "offline_colproj_sharded"
+    return "offline_colproj"

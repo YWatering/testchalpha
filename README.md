@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 9 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站、AKShare 数据接入、SQLite 自动刷新、本地 CSMAR 全市场日线快照，以及200只股票的 ColProj 离线特征和精确向量索引。阶段 10 再逐批扩展到全部当前上市 A 股。CNN 原型调整到阶段 11，在对照实验通过后于阶段 12 全量接入。
+阶段 0 至阶段 10 基础版已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站、AKShare 数据接入、SQLite 自动刷新、本地 CSMAR 全市场日线快照、批次队列、全市场过滤和 ColProj 分片索引发布机制。当前 CSMAR 快照已规划为28个批次，CNN 原型调整到阶段 11，在对照实验通过后于阶段 12 全量接入。
 
 阶段 0 交付内容：
 
@@ -122,6 +122,43 @@ KLINE_ACTIVE_SYMBOLS=000002,000004 \
 ```
 
 启用索引后，`/api/retrieval/config` 会返回 `index_mode=offline_colproj`，检索响应的 `performance.search_mode` 也会标记为 `offline_colproj`。索引检索仍使用精确三尺度距离和可调月线、周线权重。
+
+## 阶段十：全市场批次和分片索引
+
+为避免一次性构建数 GB 级全市场索引，先准备批次状态：
+
+```bash
+.venv/bin/kline-plan-a-share-batches \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --batch-size 200
+```
+
+每次执行下面的命令会自动选择下一个待处理批次，构建独立 ColProj 分片，并将已经完成的分片写入原子索引清单：
+
+```bash
+.venv/bin/kline-build-next-index-batch \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --index-dir data/processed/colproj_stage10 \
+  --manifest data/processed/colproj_stage10.json \
+  --batch-size 200
+```
+
+使用已发布的分片清单启动网站：
+
+```bash
+KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
+KLINE_INDEX_PATH=data/processed/colproj_stage10.json \
+  .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
+```
+
+阶段十新增接口：
+
+- `GET /api/health`：返回股票覆盖率、有效样本数、最新交易日、失败数、批次状态和当前索引版本。
+- `GET /api/symbols?q=美的&exchange=SZSE&board=MAIN`：按代码/名称、交易所、板块和分页查询股票。
+- `GET /api/valid-dates?symbol=000333`：只返回满足400日历史和20日未来窗口的可检索日期。
+- `/api/symbols?watchlist=000333,600519`：只返回指定自选股票池。
+
+当前真实 CSMAR 快照状态为5,428只股票、5,164只具备完整可检索窗口、6,862,102个有效样本、最新交易日2026-10-23。数据库和索引分片仍属于本地运行数据，不推送到 GitHub。
 
 用下载的数据启动网页：
 

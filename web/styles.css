@@ -69,6 +69,15 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 .primary-button:hover { background: var(--accent-dark); }
 .primary-button:disabled { opacity: .55; cursor: wait; }
 .primary-button span { margin-left: 8px; font-size: 18px; line-height: 0; }
+.universe-toolbar { display: grid; grid-template-columns: minmax(220px, 1.6fr) minmax(145px, 1fr) minmax(145px, 1fr) auto auto auto; gap: 10px; align-items: end; margin-top: 18px; }
+.universe-toolbar .field { gap: 6px; }
+.universe-toolbar input[type="search"] { width: 100%; height: 38px; padding: 0 11px; color: var(--ink); background: #fbfcfc; border: 1px solid #cfd9dc; border-radius: 5px; outline: none; }
+.universe-toolbar input[type="search"]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(7, 138, 132, .12); }
+.watchlist-check { display: flex; align-items: center; gap: 6px; height: 38px; color: var(--muted); font-size: 11px; white-space: nowrap; }
+.watchlist-check input { accent-color: var(--accent); }
+.secondary-button { height: 38px; padding: 0 12px; color: var(--accent-dark); background: #eef8f6; border: 1px solid #b9dcd5; border-radius: 5px; cursor: pointer; font-size: 11px; font-weight: 750; white-space: nowrap; }
+.secondary-button:hover { background: #dff1ed; }
+.universe-count { color: var(--muted); font-size: 11px; white-space: nowrap; }
 
 .weight-controls { display: grid; grid-template-columns: 86px minmax(190px, 1fr) minmax(190px, 1fr) 120px 150px; gap: 20px; align-items: center; margin-top: 23px; padding-top: 18px; border-top: 1px solid var(--line); }
 .range-field input[type="range"] { width: 100%; accent-color: var(--accent); }
@@ -139,6 +148,9 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
   .field-topk { grid-column: span 1; }
   .primary-button { grid-column: span 2; }
   .weight-controls { grid-template-columns: 1fr 1fr; }
+  .universe-toolbar { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .universe-search { grid-column: span 2; }
+  .universe-count { justify-self: end; }
   .control-label { grid-column: span 2; }
   .fixed-weight { grid-column: 1; }
   .embargo-field { grid-column: 2; }
@@ -156,6 +168,9 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
   .query-form { grid-template-columns: 1fr; margin-top: 20px; }
   .primary-button { grid-column: auto; }
   .weight-controls { grid-template-columns: 1fr; gap: 15px; }
+  .universe-toolbar { grid-template-columns: 1fr; }
+  .universe-search { grid-column: auto; }
+  .universe-count { justify-self: start; }
   .control-label { grid-column: auto; }
   .fixed-weight, .embargo-field { grid-column: auto; }
   .horizon-switcher { align-self: flex-start; }

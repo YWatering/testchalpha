@@ -15,6 +15,9 @@ kline-build-database = "kline_retrieval.database_cli:main"
 kline-import-csmar = "kline_retrieval.csmar_import:main"
 kline-build-colproj-index = "kline_retrieval.index_cli:main"
 kline-sync-instrument-names = "kline_retrieval.instrument_names:main"
+kline-plan-a-share-batches = "kline_retrieval.universe_cli:main"
+kline-publish-index-manifest = "kline_retrieval.index_manifest:main"
+kline-build-next-index-batch = "kline_retrieval.batch_index_cli:main"
 
 [project.optional-dependencies]
 web = [

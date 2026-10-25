@@ -8,6 +8,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from kline_retrieval import (  # noqa: E402
+    CompositeOfflineFeatureIndex,
     MarketData,
     OfflineFeatureIndex,
     ProjectConfig,
@@ -113,6 +114,27 @@ class OfflineIndexTests(unittest.TestCase):
             self.assertEqual(
                 response.json()["performance"]["search_mode"], "offline_colproj"
             )
+
+    def test_composite_index_merges_shards_and_reranks_globally(self) -> None:
+        rows = make_rows(symbol="000002") + make_rows(symbol="000004", offset=5.0)
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            first_path = Path(directory) / "colproj-1.sqlite3"
+            second_path = Path(directory) / "colproj-2.sqlite3"
+            write_snapshot(database, rows, source_hash="fixture-source", manifest={"provider": "fixture"})
+            config = ProjectConfig(active_symbols=("000002", "000004"))
+            build_colproj_index(database, first_path, symbols=("000002",), config=config)
+            build_colproj_index(database, second_path, symbols=("000004",), config=config)
+            market = MarketData.from_sqlite(database, symbols=config.active_symbols)
+            query_date = market.dates("000002")[-21]
+            query = build_sample_embedding(market, "000002", query_date, config=config)
+            composite = CompositeOfflineFeatureIndex((first_path, second_path))
+            matches, diagnostics = composite.search(query, market, top_k=5, embargo_trading_days=3)
+
+            self.assertTrue(composite.is_compatible(market.source_hash, config))
+            self.assertEqual(diagnostics["index_shard_count"], 2)
+            self.assertEqual(diagnostics["index_candidate_count"], 197)
+            self.assertEqual(len(matches), 5)
 
 
 if __name__ == "__main__":

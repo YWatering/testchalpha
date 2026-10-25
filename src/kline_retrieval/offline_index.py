@@ -354,6 +354,80 @@ class OfflineFeatureIndex:
         }
 
 
+class CompositeOfflineFeatureIndex:
+    """Query multiple ready index shards as one exact logical index."""
+
+    def __init__(self, index_paths: Sequence[str | Path]) -> None:
+        paths = tuple(Path(path) for path in index_paths)
+        if not paths:
+            raise ValueError("至少需要一个索引分片")
+        self.indexes = tuple(OfflineFeatureIndex(path) for path in paths)
+        first = self.indexes[0]
+        self.paths = paths
+        self.config = first.config
+        self.model = first.model
+        self.dimension = first.dimension
+        self.version_id = "composite-" + sha256(
+            "|".join(index.version_id for index in self.indexes).encode("utf-8")
+        ).hexdigest()[:16]
+        self.source_hash = first.source_hash
+        self.symbols = tuple(sorted({symbol for index in self.indexes for symbol in index.symbols}))
+        self.sample_count = sum(index.sample_count for index in self.indexes)
+
+    def is_compatible(self, source_hash: str | None, config: ProjectConfig) -> bool:
+        return all(index.is_compatible(source_hash, config) for index in self.indexes)
+
+    def search(
+        self,
+        query: RetrievalSample,
+        market_data: MarketData,
+        *,
+        month_weight: float = 1.0,
+        week_weight: float = 1.0,
+        day_weight: float = 1.0,
+        top_k: int = 20,
+        embargo_trading_days: int = 0,
+    ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
+        started = perf_counter()
+        matches: list[SimilarityMatch] = []
+        candidate_count = 0
+        shard_times = 0.0
+        for index in self.indexes:
+            shard_matches, diagnostics = index.search(
+                query,
+                market_data,
+                month_weight=month_weight,
+                week_weight=week_weight,
+                day_weight=day_weight,
+                top_k=top_k,
+                embargo_trading_days=embargo_trading_days,
+            )
+            matches.extend(shard_matches)
+            candidate_count += int(diagnostics.get("index_candidate_count", 0))
+            shard_times += float(diagnostics.get("index_ms", 0.0))
+        ranked = sorted(
+            matches,
+            key=lambda item: (item.distance, item.sample.symbol, item.sample.date),
+        )[:top_k]
+        ranked = [
+            SimilarityMatch(
+                rank=rank,
+                sample=item.sample,
+                distance=item.distance,
+                monthly_distance=item.monthly_distance,
+                weekly_distance=item.weekly_distance,
+                daily_distance=item.daily_distance,
+            )
+            for rank, item in enumerate(ranked, 1)
+        ]
+        return ranked, {
+            "index_candidate_count": candidate_count,
+            "index_shard_count": len(self.indexes),
+            "index_shard_ms": round(shard_times, 3),
+            "index_ms": round((perf_counter() - started) * 1000, 3),
+        }
+
+
 def _distance_rows(
     query: SampleEmbeddings,
     rows: Sequence[tuple[str, str, bytes, bytes, bytes]],

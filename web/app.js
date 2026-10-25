@@ -1,4 +1,11 @@
-const state = { result: null, horizons: [1, 5, 10, 20], chartSize: 64, sourceHash: null };
+const state = {
+  result: null,
+  horizons: [1, 5, 10, 20],
+  chartSize: 64,
+  sourceHash: null,
+  instruments: [],
+  watchlist: new Set(JSON.parse(localStorage.getItem('pattern-atlas-watchlist') || '[]')),
+};
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({
@@ -11,6 +18,11 @@ const formatPercent = (value) => {
 };
 const formatDistance = (value) => Number(value).toFixed(4);
 const chartLabel = { monthly: '月线 · 20D/根', weekly: '周线 · 5D/根', daily: '日线 · 1D/根', future: '未来 · 20D' };
+
+const symbolName = (symbol) => {
+  const item = state.instruments.find((candidate) => candidate.symbol === symbol);
+  return item && item.name && item.name !== symbol ? `${symbol}·${item.name}` : symbol;
+};
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -31,7 +43,7 @@ function setImageCard(name, src) {
 }
 
 function renderQuery(query) {
-  $('#query-title').textContent = `${query.symbol} · ${query.date}`;
+  $('#query-title').textContent = `${symbolName(query.symbol)} · ${query.date}`;
   $('#query-meta').textContent = '历史窗口已构建 · 未来图不参与检索';
   $('#query-charts').innerHTML = ['monthly', 'weekly', 'daily']
     .map((name) => setImageCard(name, query.charts[name])).join('');
@@ -97,14 +109,14 @@ function renderResults(result) {
   }
   $('#results-table-body').innerHTML = matches.map((match) => {
     const returns = match.returns || {};
-    return `<tr><td class="rank-cell">${match.rank}</td><td class="sample-cell"><strong>${escapeHtml(match.symbol)}</strong><span>${escapeHtml(match.date)}</span></td><td class="distance-cell">${formatDistance(match.distance)}</td>${state.horizons.map((horizon) => `<td class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</td>`).join('')}</tr>`;
+    return `<tr><td class="rank-cell">${match.rank}</td><td class="sample-cell"><strong>${escapeHtml(symbolName(match.symbol))}</strong><span>${escapeHtml(match.date)}</span></td><td class="distance-cell">${formatDistance(match.distance)}</td>${state.horizons.map((horizon) => `<td class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</td>`).join('')}</tr>`;
   }).join('');
   $('#result-cards').innerHTML = matches.map((match) => {
     const returns = match.returns || {};
     const chartNames = ['monthly', 'weekly', 'daily'];
     const charts = chartNames.map((name) => `<div class="mini-chart"><span>${chartLabel[name]}</span><img src="${match.charts[name]}" alt="${chartLabel[name]}" /></div>`).join('');
     const allCharts = charts + `<div class="mini-chart"><span>${chartLabel.future}</span><img src="${match.future_chart}" alt="未来 20 日走势" /></div>`;
-    return `<article class="match-card"><div class="match-card-top"><div class="match-card-title">#${match.rank} · ${escapeHtml(match.symbol)} <span class="match-card-distance">${escapeHtml(match.date)} · 距离 ${formatDistance(match.distance)} · 权重 ${(Number(match.similarity_weight || 0) * 100).toFixed(1)}%</span></div></div><div class="match-chart-grid">${allCharts}</div><div class="match-return-row">${state.horizons.map((horizon) => `<span>未来 ${horizon}D <strong class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</strong></span>`).join('')}</div></article>`;
+    return `<article class="match-card"><div class="match-card-top"><div class="match-card-title">#${match.rank} · ${escapeHtml(symbolName(match.symbol))} <span class="match-card-distance">${escapeHtml(match.date)} · 距离 ${formatDistance(match.distance)} · 权重 ${(Number(match.similarity_weight || 0) * 100).toFixed(1)}%</span></div></div><div class="match-chart-grid">${allCharts}</div><div class="match-return-row">${state.horizons.map((horizon) => `<span>未来 ${horizon}D <strong class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</strong></span>`).join('')}</div></article>`;
   }).join('');
 }
 
@@ -114,7 +126,7 @@ function updateWeights() {
 }
 
 async function loadDates(symbol, keepCurrent = false) {
-  const payload = await api(`/api/dates?symbol=${encodeURIComponent(symbol)}`);
+  const payload = await api(`/api/valid-dates?symbol=${encodeURIComponent(symbol)}`);
   const dates = payload.dates || [];
   const dateInput = $('#date-input');
   dateInput.min = dates[0] || '';
@@ -122,9 +134,42 @@ async function loadDates(symbol, keepCurrent = false) {
   if (!keepCurrent || !dates.includes(dateInput.value)) dateInput.value = dates[dates.length - 1] || '';
 }
 
+function persistWatchlist() {
+  localStorage.setItem('pattern-atlas-watchlist', JSON.stringify([...state.watchlist].sort()));
+}
+
+function renderSymbolOptions(keepCurrent = true) {
+  const search = $('#symbol-search').value.trim().toLowerCase();
+  const exchange = $('#exchange-filter').value;
+  const board = $('#board-filter').value;
+  const watchlistOnly = $('#watchlist-only').checked;
+  const filtered = state.instruments.filter((item) => {
+    const matchesSearch = !search || item.symbol.toLowerCase().includes(search) || String(item.name || '').toLowerCase().includes(search);
+    const matchesExchange = !exchange || item.exchange === exchange;
+    const matchesBoard = !board || item.board === board;
+    const matchesWatchlist = !watchlistOnly || state.watchlist.has(item.symbol);
+    return matchesSearch && matchesExchange && matchesBoard && matchesWatchlist;
+  });
+  const symbolInput = $('#symbol-input');
+  const current = keepCurrent ? symbolInput.value : '';
+  symbolInput.innerHTML = filtered.map((item) => `<option value="${escapeHtml(item.symbol)}">${escapeHtml(symbolName(item.symbol))}</option>`).join('');
+  if (filtered.some((item) => item.symbol === current)) symbolInput.value = current;
+  $('#universe-count').textContent = `${filtered.length} 只股票`;
+  updateWatchlistButton();
+  if (symbolInput.value) loadDates(symbolInput.value, keepCurrent).catch((error) => setNotice(error.message, 'error'));
+}
+
+function updateWatchlistButton() {
+  const symbol = $('#symbol-input').value;
+  const button = $('#watchlist-button');
+  const active = symbol && state.watchlist.has(symbol);
+  button.textContent = active ? '★ 移出自选' : '☆ 加入自选';
+  button.setAttribute('aria-pressed', active ? 'true' : 'false');
+}
+
 async function bootstrap() {
   try {
-    const [health, symbols, config] = await Promise.all([api('/api/health'), api('/api/symbols'), api('/api/retrieval/config')]);
+    const [health, symbols, config] = await Promise.all([api('/api/health'), api('/api/symbols?limit=20000'), api('/api/retrieval/config')]);
     $('#health-label').textContent = '数据服务在线';
     $('.status-dot').classList.add('online');
     const dataset = health.dataset || {};
@@ -133,7 +178,7 @@ async function bootstrap() {
     const sourceName = dataset.provider === 'akshare' ? `AKShare${endpointName ? ` · ${endpointName}` : ''}` : dataset.provider === 'synthetic' ? '合成演示' : '本地文件';
     const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
     const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
-    const indexName = health.index?.mode === 'offline_colproj' ? ' · ColProj 离线索引' : '';
+    const indexName = health.index?.mode?.startsWith('offline_colproj') ? ' · ColProj 离线索引' : '';
     $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}${storageName}${indexName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
@@ -141,14 +186,8 @@ async function bootstrap() {
     state.horizons = config.future_horizons || state.horizons;
     state.chartSize = Number((config.chart_size || [64])[0]);
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
-    const symbolInput = $('#symbol-input');
-    const names = Object.fromEntries((symbols.instruments || []).map((item) => [item.symbol, item.name]));
-    symbolInput.innerHTML = symbols.symbols.map((symbol) => {
-      const name = names[symbol];
-      const label = name && name !== symbol ? `${symbol}·${name}` : symbol;
-      return `<option value="${escapeHtml(symbol)}">${escapeHtml(label)}</option>`;
-    }).join('');
-    await loadDates(symbolInput.value);
+    state.instruments = symbols.instruments || (symbols.symbols || []).map((symbol) => ({ symbol, name: symbol }));
+    renderSymbolOptions(false);
     setNotice('选择参数后执行检索。');
   } catch (error) {
     $('#health-label').textContent = '数据服务异常';
@@ -190,7 +229,23 @@ async function runSearch(event) {
   }
 }
 
-$('#symbol-input').addEventListener('change', () => loadDates($('#symbol-input').value).catch((error) => setNotice(error.message, 'error')));
+$('#symbol-input').addEventListener('change', () => {
+  updateWatchlistButton();
+  loadDates($('#symbol-input').value).catch((error) => setNotice(error.message, 'error'));
+});
+$('#symbol-search').addEventListener('input', () => renderSymbolOptions(false));
+$('#exchange-filter').addEventListener('change', () => renderSymbolOptions(false));
+$('#board-filter').addEventListener('change', () => renderSymbolOptions(false));
+$('#watchlist-only').addEventListener('change', () => renderSymbolOptions(false));
+$('#watchlist-button').addEventListener('click', () => {
+  const symbol = $('#symbol-input').value;
+  if (!symbol) return;
+  if (state.watchlist.has(symbol)) state.watchlist.delete(symbol);
+  else state.watchlist.add(symbol);
+  persistWatchlist();
+  updateWatchlistButton();
+  if ($('#watchlist-only').checked) renderSymbolOptions(false);
+});
 $('#month-weight').addEventListener('input', updateWeights);
 $('#week-weight').addEventListener('input', updateWeights);
 $('#horizon-input').addEventListener('change', () => renderStats(Number($('#horizon-input').value)));

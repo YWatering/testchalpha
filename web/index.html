@@ -49,6 +49,34 @@
           </label>
           <button class="primary-button" type="submit" id="search-button">开始检索 <span>→</span></button>
         </form>
+        <div class="universe-toolbar">
+          <label class="field universe-search">
+            <span>搜索股票</span>
+            <input id="symbol-search" type="search" placeholder="输入代码或名称" />
+          </label>
+          <label class="field">
+            <span>交易所</span>
+            <select id="exchange-filter">
+              <option value="">全部交易所</option>
+              <option value="SSE">上交所</option>
+              <option value="SZSE">深交所</option>
+              <option value="BSE">北交所</option>
+            </select>
+          </label>
+          <label class="field">
+            <span>板块</span>
+            <select id="board-filter">
+              <option value="">全部板块</option>
+              <option value="MAIN">主板</option>
+              <option value="CHINEXT">创业板</option>
+              <option value="STAR">科创板</option>
+              <option value="BSE">北交所</option>
+            </select>
+          </label>
+          <label class="watchlist-check"><input id="watchlist-only" type="checkbox" /> 只看自选</label>
+          <button class="secondary-button" type="button" id="watchlist-button">☆ 加入自选</button>
+          <span class="universe-count" id="universe-count">0 只股票</span>
+        </div>
         <div class="weight-controls">
           <div class="control-label">尺度权重</div>
           <label class="range-field">
@@ -136,6 +164,6 @@
     </main>
 
     <footer class="footer">Pattern Atlas · 历史形态统计工具 · 结果用于研究，不构成投资建议</footer>
-    <script src="/static/app.js?v=stage9-offline-index-names-20261025" defer></script>
+    <script src="/static/app.js?v=stage10-universe-20261025" defer></script>
   </body>
 </html>

@@ -53,6 +53,33 @@ CREATE TABLE IF NOT EXISTS sync_staging_bars (
     volume REAL,
     PRIMARY KEY (run_key, symbol, date)
 );
+CREATE TABLE IF NOT EXISTS universe_symbols (
+    symbol TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    exchange TEXT NOT NULL,
+    board TEXT NOT NULL,
+    status TEXT NOT NULL,
+    data_start_date TEXT,
+    data_end_date TEXT,
+    bar_count INTEGER NOT NULL DEFAULT 0,
+    valid_sample_count INTEGER NOT NULL DEFAULT 0,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_universe_symbols_status
+    ON universe_symbols (status, symbol);
+CREATE TABLE IF NOT EXISTS universe_batches (
+    batch_id TEXT PRIMARY KEY,
+    batch_number INTEGER NOT NULL,
+    symbols_json TEXT NOT NULL,
+    status TEXT NOT NULL,
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at_utc TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_universe_batches_status
+    ON universe_batches (status, batch_number);
 """
 
 
