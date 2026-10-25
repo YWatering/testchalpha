@@ -59,6 +59,7 @@ from .analytics import (
     summarize_returns,
     similarity_weights,
 )
+from .offline_index import OfflineFeatureIndex, IndexBuildResult, build_colproj_index
 
 __all__ = [
     "DataValidationError",
@@ -112,5 +113,8 @@ __all__ = [
     "search_similar_samples",
     "summarize_returns",
     "similarity_weights",
+    "OfflineFeatureIndex",
+    "IndexBuildResult",
+    "build_colproj_index",
     "weighted_distance",
 ]

@@ -50,6 +50,10 @@ matches = search_market_data(
 - `distance`：综合距离。
 - `monthly_distance`、`weekly_distance`、`daily_distance`：各尺度距离。
 
+## 离线特征索引
+
+阶段九新增 `kline-build-colproj-index`。它将三尺度64维 ColProj 向量和未来1/5/10/20日收益标签保存到版本化 SQLite 索引中；API 通过 `KLINE_INDEX_PATH` 启用兼容版本后，检索会直接读取历史向量，不再为每个候选重复绘图。查询向量仍由当前查询样本实时生成，最终排序仍使用可调三尺度精确距离。
+
 ## 候选过滤
 
 候选样本必须满足：

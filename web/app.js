@@ -133,7 +133,8 @@ async function bootstrap() {
     const sourceName = dataset.provider === 'akshare' ? `AKShare${endpointName ? ` · ${endpointName}` : ''}` : dataset.provider === 'synthetic' ? '合成演示' : '本地文件';
     const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
     const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
-    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}${storageName}`;
+    const indexName = health.index?.mode === 'offline_colproj' ? ' · ColProj 离线索引' : '';
+    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}${storageName}${indexName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;

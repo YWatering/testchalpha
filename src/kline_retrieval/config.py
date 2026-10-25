@@ -34,6 +34,7 @@ class ProjectConfig:
     """Stable defaults shared by data, chart, retrieval and API layers."""
 
     data_path: Path = Path("data/demo_market_data.csv")
+    index_path: Path | None = None
     monthly_period: int = 20
     weekly_period: int = 5
     daily_window: int = 20
@@ -50,6 +51,8 @@ class ProjectConfig:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data_path", Path(self.data_path))
+        if self.index_path is not None:
+            object.__setattr__(self, "index_path", Path(self.index_path))
         object.__setattr__(self, "active_symbols", tuple(self.active_symbols))
         _positive_int(self.monthly_period, "monthly_period")
         _positive_int(self.weekly_period, "weekly_period")
@@ -78,6 +81,7 @@ class ProjectConfig:
         defaults = cls()
         return cls(
             data_path=env.get("KLINE_DATA_PATH", str(defaults.data_path)),
+            index_path=env.get("KLINE_INDEX_PATH") or defaults.index_path,
             monthly_period=int(env.get("KLINE_MONTHLY_PERIOD", defaults.monthly_period)),
             weekly_period=int(env.get("KLINE_WEEKLY_PERIOD", defaults.weekly_period)),
             daily_window=int(env.get("KLINE_DAILY_WINDOW", defaults.daily_window)),
@@ -115,6 +119,7 @@ class ProjectConfig:
     def as_dict(self) -> dict[str, object]:
         values = asdict(self)
         values["data_path"] = str(self.data_path)
+        values["index_path"] = str(self.index_path) if self.index_path else None
         return values
 
 

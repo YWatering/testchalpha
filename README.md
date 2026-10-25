@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 8 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站、AKShare 数据接入、SQLite 自动刷新，以及本地 CSMAR 全市场日线快照导入和阶段八的窗口、图像、加权收益与稳定性口径。阶段 9 建设 ColProj 离线特征与向量索引，阶段 10 再逐批扩展到全部当前上市 A 股。CNN 原型调整到阶段 11，在对照实验通过后于阶段 12 全量接入。
+阶段 0 至阶段 9 已完成：项目基线、行情数据、多尺度图像、ColProj 检索、收益分析、检索网站、AKShare 数据接入、SQLite 自动刷新、本地 CSMAR 全市场日线快照，以及200只股票的 ColProj 离线特征和精确向量索引。阶段 10 再逐批扩展到全部当前上市 A 股。CNN 原型调整到阶段 11，在对照实验通过后于阶段 12 全量接入。
 
 阶段 0 交付内容：
 
@@ -62,6 +62,7 @@
 - 增加未来行情变更不影响查询向量的防泄漏测试，以及缓存前后排序一致性测试。
 - 增加冷启动/热缓存性能基线命令：`python3 scripts/benchmark_retrieval.py`。
 - 已导入本地 CSMAR 日线快照：5,428 只股票、9,074,433 条日线，日期范围为 2018-01-02 至 2026-10-23；质量检查发现 0 条无效记录、0 条重复主键记录。详细结果见 [阶段八验证报告](docs/validation-stage-8.md)。
+- 前200只股票已生成 ColProj 离线索引，共321,571个有效样本；离线检索验证见 [阶段九验证报告](docs/validation-stage-9.md)。
 
 ## 下载真实 A 股数据
 
@@ -98,6 +99,29 @@ no_proxy=.sina.com.cn,.sse.com.cn,.szse.cn,.bse.cn \
 ```
 
 使用 `--offset 200 --limit 200` 继续下一批。成功股票会保存断点，单股失败会记录到 manifest，不会让整个批次失败。全市场数据库可通过 `KLINE_ACTIVE_SYMBOLS` 限制网页当前加载的检索股票池，避免阶段 9 建立向量索引前进行超大规模内存扫描。
+
+## 构建和使用 ColProj 离线索引
+
+阶段九使用 SQLite 保存 `feature_versions`、`samples` 和 `return_labels`。以下命令为前200只股票生成索引，重复执行时会跳过已有 `(股票,日期)` 样本；数据快照更新后继续执行即可补充新增有效样本。
+
+```bash
+.venv/bin/kline-build-colproj-index \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --index data/processed/colproj_stage9_200.sqlite3 \
+  --limit 200 \
+  --replace
+```
+
+使用索引启动网站：
+
+```bash
+KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
+KLINE_INDEX_PATH=data/processed/colproj_stage9_200.sqlite3 \
+KLINE_ACTIVE_SYMBOLS=000002,000004 \
+  .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
+```
+
+启用索引后，`/api/retrieval/config` 会返回 `index_mode=offline_colproj`，检索响应的 `performance.search_mode` 也会标记为 `offline_colproj`。索引检索仍使用精确三尺度距离和可调月线、周线权重。
 
 用下载的数据启动网页：
 

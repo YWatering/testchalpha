@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import json
+import sqlite3
 from datetime import date
 from pathlib import Path
 from threading import RLock
@@ -19,7 +20,13 @@ from .analytics import ReturnAnalysisError, analyze_matches
 from .charts import build_query_charts
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
-from .retrieval import RetrievalError, SampleEmbeddingCache, search_market_data
+from .offline_index import OfflineFeatureIndex
+from .retrieval import (
+    RetrievalError,
+    SampleEmbeddingCache,
+    build_sample_embedding,
+    search_market_data,
+)
 from .sqlite_store import read_instruments, read_metadata
 
 
@@ -41,6 +48,7 @@ def create_app(
     config = config or ProjectConfig.from_env()
     resolved_data_path = Path(data_path or config.data_path)
     market_data = _load_market_data(resolved_data_path, config)
+    offline_index = _load_offline_index(config.index_path, market_data, config)
     web_root = Path(__file__).resolve().parents[2] / "web"
 
     app = FastAPI(title="K-Line Pattern Retrieval", version="0.1.0")
@@ -49,6 +57,7 @@ def create_app(
     app.state.data_path = resolved_data_path
     app.state.market_data_token = _data_token(resolved_data_path)
     app.state.embedding_cache = SampleEmbeddingCache()
+    app.state.offline_index = offline_index
     app.state.data_reload_lock = RLock()
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
@@ -63,6 +72,9 @@ def create_app(
                 token = _data_token(resolved_data_path)
                 if token != app.state.market_data_token:
                     app.state.market_data = _load_market_data(resolved_data_path, config)
+                    app.state.offline_index = _load_offline_index(
+                        config.index_path, app.state.market_data, config
+                    )
                     app.state.market_data_token = token
                     app.state.embedding_cache = SampleEmbeddingCache()
         return app.state.market_data
@@ -103,6 +115,15 @@ def create_app(
             if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}
             else "file",
             "dataset": dataset,
+            "index": {
+                "mode": "offline_colproj" if app.state.offline_index is not None else "request_scan",
+                "version_id": app.state.offline_index.version_id
+                if app.state.offline_index is not None
+                else None,
+                "sample_count": app.state.offline_index.sample_count
+                if app.state.offline_index is not None
+                else 0,
+            },
         }
 
     @app.get("/api/symbols")
@@ -139,6 +160,10 @@ def create_app(
             },
             "default_top_k": config.default_top_k,
             "similarity_temperature": config.similarity_temperature,
+            "index_mode": "offline_colproj"
+            if app.state.offline_index is not None
+            else "request_scan",
+            "index_path": str(config.index_path) if config.index_path else None,
         }
 
     @app.post("/api/retrieval/search")
@@ -150,18 +175,34 @@ def create_app(
         try:
             query_date = date.fromisoformat(request.date)
             diagnostics: dict[str, int | float] = {}
-            matches = search_market_data(
-                market_data,
-                request.symbol,
-                query_date,
-                config=config,
-                month_weight=request.month_weight,
-                week_weight=request.week_weight,
-                top_k=request.top_k,
-                embargo_trading_days=request.embargo_trading_days,
-                embedding_cache=app.state.embedding_cache,
-                diagnostics=diagnostics,
-            )
+            if app.state.offline_index is not None:
+                query = build_sample_embedding(
+                    market_data, request.symbol, query_date, config=config
+                )
+                matches, index_diagnostics = app.state.offline_index.search(
+                    query,
+                    market_data,
+                    month_weight=request.month_weight,
+                    week_weight=request.week_weight,
+                    top_k=request.top_k,
+                    embargo_trading_days=request.embargo_trading_days,
+                )
+                diagnostics.update(index_diagnostics)
+                diagnostics["search_mode"] = "offline_colproj"
+            else:
+                matches = search_market_data(
+                    market_data,
+                    request.symbol,
+                    query_date,
+                    config=config,
+                    month_weight=request.month_weight,
+                    week_weight=request.week_weight,
+                    top_k=request.top_k,
+                    embargo_trading_days=request.embargo_trading_days,
+                    embedding_cache=app.state.embedding_cache,
+                    diagnostics=diagnostics,
+                )
+                diagnostics["search_mode"] = "request_scan"
             analysis = analyze_matches(market_data, matches, config=config)
             query_charts = build_query_charts(
                 market_data,
@@ -255,3 +296,17 @@ def _load_market_data(path: Path, config: ProjectConfig) -> MarketData:
     if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
         return MarketData.from_sqlite(path, symbols=config.active_symbols or None)
     return MarketData.from_file(path)
+
+
+def _load_offline_index(
+    index_path: Path | None,
+    market_data: MarketData,
+    config: ProjectConfig,
+) -> OfflineFeatureIndex | None:
+    if index_path is None or not index_path.is_file():
+        return None
+    try:
+        index = OfflineFeatureIndex(index_path)
+    except (OSError, ValueError, sqlite3.Error):
+        return None
+    return index if index.is_compatible(market_data.source_hash, config) else None
