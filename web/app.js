@@ -26,7 +26,8 @@ function setNotice(message, tone = '') {
 }
 
 function setImageCard(name, src) {
-  return `<article class="chart-card"><div class="chart-card-header"><strong>${chartLabel[name] || name}</strong><span>${state.chartSize} × ${state.chartSize}</span></div><div class="chart-frame"><img src="${src}" alt="${chartLabel[name] || name} K 线图" /></div></article>`;
+  const dimension = `${state.chartSize} × ${state.chartSize}`;
+  return `<article class="chart-card"><div class="chart-card-header"><strong>${chartLabel[name] || name}</strong><span data-chart-dimension>${dimension}</span></div><div class="chart-frame"><img src="${src}" alt="${chartLabel[name] || name} K 线图" /></div></article>`;
 }
 
 function renderQuery(query) {
