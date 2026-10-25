@@ -13,13 +13,25 @@ sys.path.insert(0, str(ROOT / "src"))
 from fastapi.testclient import TestClient  # noqa: E402
 
 from kline_retrieval.api import app as configured_app, create_app  # noqa: E402
+from kline_retrieval.config import ProjectConfig  # noqa: E402
 from kline_retrieval.sqlite_store import write_snapshot  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
-        cls.client = TestClient(create_app(ROOT / "data" / "demo_market_data.csv"))
+        cls.client = TestClient(
+            create_app(
+                ROOT / "data" / "demo_market_data.csv",
+                config=ProjectConfig(
+                    daily_window=12,
+                    future_chart_window=12,
+                    chart_width=64,
+                    chart_height=64,
+                    future_horizons=(1, 5, 10, 12, 21),
+                ),
+            )
+        )
 
     def test_health_symbols_and_dates_endpoints(self) -> None:
         health = self.client.get("/api/health")

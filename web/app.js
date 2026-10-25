@@ -1,4 +1,4 @@
-const state = { result: null, horizons: [1, 5, 10, 12, 21], sourceHash: null };
+const state = { result: null, horizons: [1, 5, 10, 20], chartSize: 64, sourceHash: null };
 
 const $ = (selector) => document.querySelector(selector);
 const escapeHtml = (value) => String(value).replace(/[&<>'"]/g, (char) => ({
@@ -10,7 +10,7 @@ const formatPercent = (value) => {
   return `${number >= 0 ? '+' : ''}${number.toFixed(2)}%`;
 };
 const formatDistance = (value) => Number(value).toFixed(4);
-const chartLabel = { monthly: '月线 · 20D', weekly: '周线 · 5D', daily: '日线 · 1D', future_12d: '未来 · 12D' };
+const chartLabel = { monthly: '月线 · 20D/根', weekly: '周线 · 5D/根', daily: '日线 · 1D/根', future: '未来 · 20D' };
 
 async function api(path, options = {}) {
   const response = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...options });
@@ -26,7 +26,7 @@ function setNotice(message, tone = '') {
 }
 
 function setImageCard(name, src) {
-  return `<article class="chart-card"><div class="chart-card-header"><strong>${chartLabel[name] || name}</strong><span>36 × 36</span></div><div class="chart-frame"><img src="${src}" alt="${chartLabel[name] || name} K 线图" /></div></article>`;
+  return `<article class="chart-card"><div class="chart-card-header"><strong>${chartLabel[name] || name}</strong><span>${state.chartSize} × ${state.chartSize}</span></div><div class="chart-frame"><img src="${src}" alt="${chartLabel[name] || name} K 线图" /></div></article>`;
 }
 
 function renderQuery(query) {
@@ -46,12 +46,14 @@ function renderStats(horizon) {
   const stat = state.result.statistics[String(horizon)];
   if (!stat) return;
   const cards = [
-    ['平均收益', formatPercent(stat.mean)],
-    ['中位数', formatPercent(stat.median)],
-    ['胜率', stat.win_rate === null ? '—' : `${(stat.win_rate * 100).toFixed(1)}%`],
-    ['样本数', stat.count],
+    ['加权平均收益', formatPercent(stat.weighted_mean)],
+    ['简单平均收益', formatPercent(stat.mean)],
+    ['加权标准差', formatPercent(stat.weighted_std)],
+    ['稳定性得分', stat.signal_strength === null || !Number.isFinite(Number(stat.signal_strength)) ? '—' : Number(stat.signal_strength).toFixed(2)],
+    ['有效样本数', stat.effective_sample_size === null ? '—' : Number(stat.effective_sample_size).toFixed(1)],
+    ['95%区间下界', formatPercent(stat.lower_bound)],
   ];
-  $('#stats-grid').innerHTML = cards.map(([label, value]) => `<div class="stat-card"><span>${label}</span><strong class="${returnClass(stat.mean)}">${value}</strong></div>`).join('');
+  $('#stats-grid').innerHTML = cards.map(([label, value], index) => `<div class="stat-card"><span>${label}</span><strong class="${returnClass(index === 0 ? stat.weighted_mean : stat.mean)}">${value}</strong></div>`).join('');
   $('#distribution-caption').textContent = `未来 ${horizon} 个交易日 · ${stat.count} 个历史样本`;
   renderDistribution(stat);
 }
@@ -94,14 +96,14 @@ function renderResults(result) {
   }
   $('#results-table-body').innerHTML = matches.map((match) => {
     const returns = match.returns || {};
-    return `<tr><td class="rank-cell">${match.rank}</td><td class="sample-cell"><strong>${escapeHtml(match.symbol)}</strong><span>${escapeHtml(match.date)}</span></td><td class="distance-cell">${formatDistance(match.distance)}</td><td class="${returnClass(returns['1'])}">${formatPercent(returns['1'])}</td><td class="${returnClass(returns['5'])}">${formatPercent(returns['5'])}</td><td class="${returnClass(returns['12'])}">${formatPercent(returns['12'])}</td><td class="${returnClass(returns['21'])}">${formatPercent(returns['21'])}</td></tr>`;
+    return `<tr><td class="rank-cell">${match.rank}</td><td class="sample-cell"><strong>${escapeHtml(match.symbol)}</strong><span>${escapeHtml(match.date)}</span></td><td class="distance-cell">${formatDistance(match.distance)}</td>${state.horizons.map((horizon) => `<td class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</td>`).join('')}</tr>`;
   }).join('');
   $('#result-cards').innerHTML = matches.map((match) => {
     const returns = match.returns || {};
     const chartNames = ['monthly', 'weekly', 'daily'];
     const charts = chartNames.map((name) => `<div class="mini-chart"><span>${chartLabel[name]}</span><img src="${match.charts[name]}" alt="${chartLabel[name]}" /></div>`).join('');
-    const allCharts = charts + `<div class="mini-chart"><span>${chartLabel.future_12d}</span><img src="${match.future_chart}" alt="未来 12 日走势" /></div>`;
-    return `<article class="match-card"><div class="match-card-top"><div class="match-card-title">#${match.rank} · ${escapeHtml(match.symbol)} <span class="match-card-distance">${escapeHtml(match.date)} · 距离 ${formatDistance(match.distance)}</span></div></div><div class="match-chart-grid">${allCharts}</div><div class="match-return-row">${[1, 5, 10, 12, 21].map((horizon) => `<span>未来 ${horizon}D <strong class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</strong></span>`).join('')}</div></article>`;
+    const allCharts = charts + `<div class="mini-chart"><span>${chartLabel.future}</span><img src="${match.future_chart}" alt="未来 20 日走势" /></div>`;
+    return `<article class="match-card"><div class="match-card-top"><div class="match-card-title">#${match.rank} · ${escapeHtml(match.symbol)} <span class="match-card-distance">${escapeHtml(match.date)} · 距离 ${formatDistance(match.distance)} · 权重 ${(Number(match.similarity_weight || 0) * 100).toFixed(1)}%</span></div></div><div class="match-chart-grid">${allCharts}</div><div class="match-return-row">${state.horizons.map((horizon) => `<span>未来 ${horizon}D <strong class="${returnClass(returns[String(horizon)])}">${formatPercent(returns[String(horizon)])}</strong></span>`).join('')}</div></article>`;
   }).join('');
 }
 
@@ -135,6 +137,7 @@ async function bootstrap() {
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;
     state.horizons = config.future_horizons || state.horizons;
+    state.chartSize = Number((config.chart_size || [64])[0]);
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
     const symbolInput = $('#symbol-input');
     const names = Object.fromEntries((symbols.instruments || []).map((item) => [item.symbol, item.name]));

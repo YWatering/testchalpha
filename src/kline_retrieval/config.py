@@ -22,6 +22,13 @@ def _non_negative_float(value: object, name: str) -> float:
     return parsed
 
 
+def _positive_float(value: object, name: str) -> float:
+    parsed = float(value)
+    if parsed <= 0:
+        raise ValueError(f"{name} 必须大于 0")
+    return parsed
+
+
 @dataclass(frozen=True, slots=True)
 class ProjectConfig:
     """Stable defaults shared by data, chart, retrieval and API layers."""
@@ -29,14 +36,15 @@ class ProjectConfig:
     data_path: Path = Path("data/demo_market_data.csv")
     monthly_period: int = 20
     weekly_period: int = 5
-    daily_window: int = 12
-    future_chart_window: int = 12
-    chart_width: int = 36
-    chart_height: int = 36
-    future_horizons: tuple[int, ...] = (1, 5, 10, 12, 21)
+    daily_window: int = 20
+    future_chart_window: int = 20
+    chart_width: int = 64
+    chart_height: int = 64
+    future_horizons: tuple[int, ...] = (1, 5, 10, 20)
     month_weight: float = 1.0
     week_weight: float = 1.0
     day_weight: float = 1.0
+    similarity_temperature: float = 0.25
     default_top_k: int = 20
     active_symbols: tuple[str, ...] = ()
 
@@ -58,6 +66,7 @@ class ProjectConfig:
 
         _non_negative_float(self.month_weight, "month_weight")
         _non_negative_float(self.week_weight, "week_weight")
+        _positive_float(self.similarity_temperature, "similarity_temperature")
         if self.day_weight != 1.0:
             raise ValueError("day_weight 在当前产品定义中必须固定为 1.0")
 
@@ -77,9 +86,20 @@ class ProjectConfig:
             ),
             chart_width=int(env.get("KLINE_CHART_WIDTH", defaults.chart_width)),
             chart_height=int(env.get("KLINE_CHART_HEIGHT", defaults.chart_height)),
+            future_horizons=tuple(
+                int(item.strip())
+                for item in env.get(
+                    "KLINE_FUTURE_HORIZONS",
+                    ",".join(str(item) for item in defaults.future_horizons),
+                ).split(",")
+                if item.strip()
+            ),
             month_weight=float(env.get("KLINE_MONTH_WEIGHT", defaults.month_weight)),
             week_weight=float(env.get("KLINE_WEEK_WEIGHT", defaults.week_weight)),
             day_weight=float(env.get("KLINE_DAY_WEIGHT", defaults.day_weight)),
+            similarity_temperature=float(
+                env.get("KLINE_SIMILARITY_TEMPERATURE", defaults.similarity_temperature)
+            ),
             default_top_k=int(env.get("KLINE_DEFAULT_TOP_K", defaults.default_top_k)),
             active_symbols=tuple(
                 symbol.strip()

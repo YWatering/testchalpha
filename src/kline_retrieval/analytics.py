@@ -45,6 +45,7 @@ class MatchOutcome:
     match: SimilarityMatch
     forward_returns: ForwardReturns
     future_chart: GrayscaleImage
+    similarity_weight: float = 1.0
 
     def as_dict(self) -> dict[str, object]:
         sample = self.match.sample
@@ -53,6 +54,7 @@ class MatchOutcome:
             "symbol": sample.symbol,
             "date": sample.date.isoformat(),
             "distance": self.match.distance,
+            "similarity_weight": self.similarity_weight,
             "monthly_distance": self.match.monthly_distance,
             "weekly_distance": self.match.weekly_distance,
             "daily_distance": self.match.daily_distance,
@@ -83,8 +85,16 @@ class ReturnStatistics:
     horizon: int
     values: tuple[float, ...]
     mean: float | None
+    weighted_mean: float | None
     median: float | None
     win_rate: float | None
+    weighted_win_rate: float | None
+    weighted_std: float | None
+    effective_sample_size: float | None
+    standard_error: float | None
+    signal_strength: float | None
+    lower_bound: float | None
+    upper_bound: float | None
     minimum: float | None
     maximum: float | None
     quantiles: tuple[tuple[str, float], ...]
@@ -96,8 +106,16 @@ class ReturnStatistics:
             "horizon": self.horizon,
             "count": len(self.values),
             "mean": self.mean,
+            "weighted_mean": self.weighted_mean,
             "median": self.median,
             "win_rate": self.win_rate,
+            "weighted_win_rate": self.weighted_win_rate,
+            "weighted_std": self.weighted_std,
+            "effective_sample_size": self.effective_sample_size,
+            "standard_error": self.standard_error,
+            "signal_strength": self.signal_strength,
+            "lower_bound": self.lower_bound,
+            "upper_bound": self.upper_bound,
             "minimum": self.minimum,
             "maximum": self.maximum,
             "quantiles": {name: value for name, value in self.quantiles},
@@ -167,8 +185,9 @@ def build_match_outcomes(
     """Attach forward-return labels and future charts to ranked matches."""
 
     requested_horizons = config.future_horizons if horizons is None else horizons
+    weights = similarity_weights(matches, config.similarity_temperature)
     outcomes: list[MatchOutcome] = []
-    for match in matches:
+    for match, weight in zip(matches, weights):
         sample = match.sample
         try:
             returns = calculate_forward_returns(
@@ -192,6 +211,7 @@ def build_match_outcomes(
                 match=match,
                 forward_returns=returns,
                 future_chart=future_chart,
+                similarity_weight=weight,
             )
         )
     return tuple(outcomes)
@@ -217,47 +237,109 @@ def analyze_matches(
         summarize_returns(
             requested_horizon,
             [outcome.forward_returns.for_horizon(requested_horizon) for outcome in outcomes],
+            weights=[outcome.similarity_weight for outcome in outcomes],
         )
         for requested_horizon in requested_horizons
     )
     return ReturnAnalysis(outcomes=outcomes, statistics=statistics)
 
 
-def summarize_returns(horizon: int, values: Iterable[float]) -> ReturnStatistics:
+def summarize_returns(
+    horizon: int,
+    values: Iterable[float],
+    *,
+    weights: Iterable[float] | None = None,
+) -> ReturnStatistics:
     """Summarize one return horizon, including histogram and Gaussian KDE."""
 
     normalized_horizon = _normalize_horizons((horizon,))[0]
-    ordered = tuple(sorted(float(value) for value in values))
-    if not ordered:
+    raw_values = tuple(float(value) for value in values)
+    raw_weights = (
+        tuple(float(weight) for weight in weights)
+        if weights is not None
+        else tuple(1.0 for _ in raw_values)
+    )
+    if len(raw_values) != len(raw_weights):
+        raise ReturnAnalysisError("收益值和相似度权重数量不一致")
+    if not raw_values:
         return ReturnStatistics(
             horizon=normalized_horizon,
             values=(),
             mean=None,
+            weighted_mean=None,
             median=None,
             win_rate=None,
+            weighted_win_rate=None,
+            weighted_std=None,
+            effective_sample_size=None,
+            standard_error=None,
+            signal_strength=None,
+            lower_bound=None,
+            upper_bound=None,
             minimum=None,
             maximum=None,
             quantiles=(),
             histogram=Histogram(edges=(), counts=()),
             kde=KDECurve(x=(), density=()),
         )
-
+    if any(weight < 0 for weight in raw_weights) or sum(raw_weights) <= 0:
+        raise ReturnAnalysisError("相似度权重必须非负且至少有一个正权重")
+    ordered_pairs = tuple(sorted(zip(raw_values, raw_weights), key=lambda pair: pair[0]))
+    ordered = tuple(value for value, _ in ordered_pairs)
+    ordered_weights = tuple(weight for _, weight in ordered_pairs)
     quantiles = tuple(
         (name, _quantile(ordered, probability))
         for name, probability in (("q10", 0.10), ("q25", 0.25), ("q75", 0.75), ("q90", 0.90))
     )
+    weight_sum = sum(ordered_weights)
+    weighted_mean = sum(value * weight for value, weight in zip(ordered, ordered_weights)) / weight_sum
+    weighted_variance = sum(
+        weight * (value - weighted_mean) ** 2
+        for value, weight in zip(ordered, ordered_weights)
+    ) / weight_sum
+    weighted_std = sqrt(max(0.0, weighted_variance))
+    effective_sample_size = weight_sum * weight_sum / sum(weight * weight for weight in ordered_weights)
+    standard_error = weighted_std / sqrt(effective_sample_size)
+    signal_strength = weighted_mean / weighted_std if weighted_std > 0 else None
+    margin = 1.96 * standard_error
     return ReturnStatistics(
         horizon=normalized_horizon,
         values=ordered,
         mean=fmean(ordered),
+        weighted_mean=weighted_mean,
         median=median(ordered),
         win_rate=sum(value > 0 for value in ordered) / len(ordered),
+        weighted_win_rate=sum(
+            weight for value, weight in zip(ordered, ordered_weights) if value > 0
+        ) / weight_sum,
+        weighted_std=weighted_std,
+        effective_sample_size=effective_sample_size,
+        standard_error=standard_error,
+        signal_strength=signal_strength,
+        lower_bound=weighted_mean - margin,
+        upper_bound=weighted_mean + margin,
         minimum=ordered[0],
         maximum=ordered[-1],
         quantiles=quantiles,
         histogram=_histogram(ordered),
         kde=_kde(ordered),
     )
+
+
+def similarity_weights(
+    matches: Sequence[SimilarityMatch], temperature: float,
+) -> tuple[float, ...]:
+    """Convert ranked distances into normalized exponential similarity weights."""
+
+    if temperature <= 0:
+        raise ReturnAnalysisError("similarity_temperature 必须大于 0")
+    if not matches:
+        return ()
+    raw = tuple(exp(-max(0.0, match.distance) / temperature) for match in matches)
+    total = sum(raw)
+    if total <= 0:
+        return tuple(1.0 / len(raw) for _ in raw)
+    return tuple(value / total for value in raw)
 
 
 def _histogram(values: Sequence[float]) -> Histogram:

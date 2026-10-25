@@ -16,7 +16,7 @@ from kline_retrieval import (  # noqa: E402
 from kline_retrieval.analytics import ReturnAnalysisError  # noqa: E402
 
 
-def make_rows(count: int = 330, symbol: str = "TEST", offset: float = 0.0) -> list[dict[str, object]]:
+def make_rows(count: int = 520, symbol: str = "TEST", offset: float = 0.0) -> list[dict[str, object]]:
     start = date(2024, 1, 2)
     rows = []
     for index in range(count):
@@ -40,19 +40,19 @@ class AnalyticsTests(unittest.TestCase):
         self.data = MarketData.from_rows(
             make_rows(symbol="TEST") + make_rows(symbol="OTHER", offset=5.0)
         )
-        self.query_date = date(2024, 1, 2) + timedelta(days=290)
+        self.query_date = date(2024, 1, 2) + timedelta(days=450)
 
     def test_calculate_forward_returns_uses_close_to_close_formula(self) -> None:
         result = calculate_forward_returns(self.data, "TEST", self.query_date)
 
         self.assertEqual(result.symbol, "TEST")
         self.assertEqual(result.date, self.query_date)
-        self.assertAlmostEqual(result.base_close, 158.0)
-        self.assertAlmostEqual(result.for_horizon(1), 0.2 / 158.0)
-        self.assertEqual(tuple(horizon for horizon, _ in result.values), (1, 5, 10, 12, 21))
+        self.assertAlmostEqual(result.base_close, 190.0)
+        self.assertAlmostEqual(result.for_horizon(1), 0.2 / 190.0)
+        self.assertEqual(tuple(horizon for horizon, _ in result.values), (1, 5, 10, 20))
 
     def test_calculate_forward_returns_rejects_incomplete_future_window(self) -> None:
-        latest_date = date(2024, 1, 2) + timedelta(days=329)
+        latest_date = date(2024, 1, 2) + timedelta(days=519)
         with self.assertRaises(ReturnAnalysisError):
             calculate_forward_returns(self.data, "TEST", latest_date)
 
@@ -60,11 +60,16 @@ class AnalyticsTests(unittest.TestCase):
         summary = summarize_returns(5, (-0.1, 0.0, 0.2, 0.3))
 
         self.assertAlmostEqual(summary.mean, 0.1)
+        self.assertAlmostEqual(summary.weighted_mean, 0.1)
         self.assertAlmostEqual(summary.median, 0.1)
         self.assertAlmostEqual(summary.win_rate, 0.5)
         self.assertEqual(sum(summary.histogram.counts), 4)
         self.assertEqual(len(summary.kde.x), 64)
         self.assertEqual(len(summary.kde.density), 64)
+
+        weighted = summarize_returns(5, (-0.1, 0.2), weights=(0.8, 0.2))
+        self.assertAlmostEqual(weighted.weighted_mean, -0.04)
+        self.assertLess(weighted.effective_sample_size, 2.0)
 
         empty = summarize_returns(5, ())
         self.assertIsNone(empty.mean)
@@ -76,8 +81,8 @@ class AnalyticsTests(unittest.TestCase):
         analysis = analyze_matches(self.data, matches)
 
         self.assertEqual(len(analysis.outcomes), 5)
-        self.assertEqual(len(analysis.statistics), 5)
-        self.assertEqual(analysis.for_horizon(12).horizon, 12)
+        self.assertEqual(len(analysis.statistics), 4)
+        self.assertEqual(analysis.for_horizon(20).horizon, 20)
         self.assertTrue(all(outcome.future_chart.black_pixel_count > 0 for outcome in analysis.outcomes))
         self.assertEqual(len(analysis.as_dict()["matches"]), 5)
 

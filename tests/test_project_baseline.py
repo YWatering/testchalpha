@@ -13,9 +13,9 @@ class ProjectBaselineTests(unittest.TestCase):
     def test_default_config_matches_project_contract(self) -> None:
         self.assertEqual(DEFAULT_CONFIG.monthly_period, 20)
         self.assertEqual(DEFAULT_CONFIG.weekly_period, 5)
-        self.assertEqual(DEFAULT_CONFIG.daily_window, 12)
-        self.assertEqual(DEFAULT_CONFIG.chart_size, (36, 36))
-        self.assertEqual(DEFAULT_CONFIG.future_horizons, (1, 5, 10, 12, 21))
+        self.assertEqual(DEFAULT_CONFIG.daily_window, 20)
+        self.assertEqual(DEFAULT_CONFIG.chart_size, (64, 64))
+        self.assertEqual(DEFAULT_CONFIG.future_horizons, (1, 5, 10, 20))
         self.assertEqual(DEFAULT_CONFIG.day_weight, 1.0)
 
     def test_config_can_be_overridden_by_environment_values(self) -> None:
@@ -24,12 +24,16 @@ class ProjectBaselineTests(unittest.TestCase):
                 "KLINE_DATA_PATH": "data/custom.csv",
                 "KLINE_MONTHLY_PERIOD": "10",
                 "KLINE_WEEK_WEIGHT": "2.5",
+                "KLINE_FUTURE_HORIZONS": "1,5,10,20",
+                "KLINE_SIMILARITY_TEMPERATURE": "0.4",
             }
         )
 
         self.assertEqual(config.data_path, Path("data/custom.csv"))
         self.assertEqual(config.monthly_period, 10)
         self.assertEqual(config.week_weight, 2.5)
+        self.assertEqual(config.future_horizons, (1, 5, 10, 20))
+        self.assertEqual(config.similarity_temperature, 0.4)
 
     def test_cli_loads_and_validates_sample_data(self) -> None:
         result = main(

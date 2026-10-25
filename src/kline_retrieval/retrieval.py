@@ -33,17 +33,17 @@ class ColumnProjectionEmbedder:
     For each column, black-pixel intensity is used as the weight of each row.
     The weighted row centroid is converted to an upward-positive value, empty
     columns are linearly interpolated, then the trajectory is centered and
-    L2-normalized. The result is a deterministic 36-dimensional shape vector.
+    L2-normalized. The result is a deterministic 64-dimensional shape vector.
     """
 
-    dimension = 36
+    dimension = 64
 
     def encode(self, image: object) -> tuple[float, ...]:
         width = getattr(image, "width", None)
         height = getattr(image, "height", None)
         pixels = getattr(image, "pixels", None)
         if width != self.dimension or height is None or pixels is None:
-            raise RetrievalError("ColProj 需要宽度为 36 的灰度图像")
+            raise RetrievalError("ColProj 需要宽度为 64 的灰度图像")
         if height < 2 or len(pixels) != height:
             raise RetrievalError("图像高度必须至少为 2")
 

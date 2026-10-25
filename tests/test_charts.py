@@ -19,7 +19,7 @@ from kline_retrieval import (  # noqa: E402
 from kline_retrieval.market_data import MarketBar  # noqa: E402
 
 
-def make_rows(count: int = 300, symbol: str = "TEST") -> list[dict[str, object]]:
+def make_rows(count: int = 520, symbol: str = "TEST") -> list[dict[str, object]]:
     start = date(2024, 1, 2)
     rows = []
     for offset in range(count):
@@ -41,7 +41,7 @@ def make_rows(count: int = 300, symbol: str = "TEST") -> list[dict[str, object]]
 class ChartTests(unittest.TestCase):
     def setUp(self) -> None:
         self.data = MarketData.from_rows(make_rows())
-        self.query_date = date(2024, 1, 2) + timedelta(days=250)
+        self.query_date = date(2024, 1, 2) + timedelta(days=450)
 
     def test_aggregate_ohlc_uses_first_open_last_close_and_extremes(self) -> None:
         bars = [
@@ -67,20 +67,20 @@ class ChartTests(unittest.TestCase):
     def test_build_sample_bars_has_three_query_scales_and_future_chart(self) -> None:
         sample = build_sample_bars(self.data, "TEST", self.query_date)
 
-        self.assertEqual(len(sample.monthly), 12)
-        self.assertEqual(len(sample.weekly), 12)
-        self.assertEqual(len(sample.daily), 12)
-        self.assertEqual(len(sample.future_12d), 12)
+        self.assertEqual(len(sample.monthly), 20)
+        self.assertEqual(len(sample.weekly), 20)
+        self.assertEqual(len(sample.daily), 20)
+        self.assertEqual(len(sample.future), 20)
         self.assertEqual(sample.monthly[-1].end_date, self.query_date)
-        self.assertEqual(sample.future_12d[0].start_date, self.query_date + timedelta(days=1))
+        self.assertEqual(sample.future[0].start_date, self.query_date + timedelta(days=1))
 
     def test_render_is_fixed_size_black_and_white_png(self) -> None:
         sample = build_sample_bars(self.data, "TEST", self.query_date)
         image = render_ohlc(sample.daily)
 
-        self.assertEqual((image.width, image.height), (36, 36))
+        self.assertEqual((image.width, image.height), (64, 64))
         self.assertGreater(image.black_pixel_count, 0)
-        self.assertLess(image.black_pixel_count, 36 * 36)
+        self.assertLess(image.black_pixel_count, 64 * 64)
         self.assertTrue(image.to_png_bytes().startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertTrue(set(pixel for row in image.pixels for pixel in row) <= {0, 255})
 
@@ -91,7 +91,7 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(first, second)
         with TemporaryDirectory() as directory:
             paths = save_sample_charts(first, directory, prefix="test")
-            self.assertEqual(set(paths), {"monthly", "weekly", "daily", "future_12d"})
+            self.assertEqual(set(paths), {"monthly", "weekly", "daily", "future"})
             self.assertTrue(all(path.is_file() for path in paths.values()))
 
 

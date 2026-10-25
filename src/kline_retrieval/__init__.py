@@ -57,6 +57,7 @@ from .analytics import (
     build_match_outcomes,
     calculate_forward_returns,
     summarize_returns,
+    similarity_weights,
 )
 
 __all__ = [
@@ -110,5 +111,6 @@ __all__ = [
     "search_market_data",
     "search_similar_samples",
     "summarize_returns",
+    "similarity_weights",
     "weighted_distance",
 ]

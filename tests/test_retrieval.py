@@ -19,7 +19,7 @@ from kline_retrieval import (  # noqa: E402
 from kline_retrieval.retrieval import RetrievalError  # noqa: E402
 
 
-def make_rows(count: int = 320, symbol: str = "TEST", offset: float = 0.0) -> list[dict[str, object]]:
+def make_rows(count: int = 520, symbol: str = "TEST", offset: float = 0.0) -> list[dict[str, object]]:
     start = date(2024, 1, 2)
     rows = []
     for index in range(count):
@@ -43,16 +43,16 @@ class RetrievalTests(unittest.TestCase):
         self.data = MarketData.from_rows(
             make_rows(symbol="TEST") + make_rows(symbol="OTHER", offset=5.0)
         )
-        self.query_date = date(2024, 1, 2) + timedelta(days=280)
+        self.query_date = date(2024, 1, 2) + timedelta(days=450)
 
-    def test_colproj_returns_deterministic_36_dimensional_shape_vector(self) -> None:
+    def test_colproj_returns_deterministic_64_dimensional_shape_vector(self) -> None:
         charts = build_sample_charts(self.data, "TEST", self.query_date)
         embedder = ColumnProjectionEmbedder()
 
         first = embedder.encode(charts.daily)
         second = embedder.encode(charts.daily)
 
-        self.assertEqual(len(first), 36)
+        self.assertEqual(len(first), 64)
         self.assertEqual(first, second)
         self.assertAlmostEqual(sum(value * value for value in first), 1.0)
 
@@ -61,7 +61,7 @@ class RetrievalTests(unittest.TestCase):
         embedder = ColumnProjectionEmbedder()
         flat = embedder.encode(charts.daily)
 
-        self.assertEqual(len(flat), 36)
+        self.assertEqual(len(flat), 64)
 
     def test_cosine_distance_has_expected_identity_and_opposite_values(self) -> None:
         self.assertAlmostEqual(cosine_distance((1.0, 0.0), (1.0, 0.0)), 0.0)
@@ -73,7 +73,7 @@ class RetrievalTests(unittest.TestCase):
         candidate = build_sample_embedding(
             self.data,
             "OTHER",
-            date(2024, 1, 2) + timedelta(days=250),
+            date(2024, 1, 2) + timedelta(days=400),
         )
 
         total, monthly, weekly, daily = weighted_distance(
@@ -119,17 +119,17 @@ class RetrievalTests(unittest.TestCase):
         )
 
     def test_market_search_can_query_latest_date_without_future_chart(self) -> None:
-        latest_date = date(2024, 1, 2) + timedelta(days=319)
+        latest_date = date(2024, 1, 2) + timedelta(days=519)
         results = search_market_data(self.data, "TEST", latest_date, top_k=3)
 
         self.assertEqual(len(results), 3)
         self.assertTrue(all(result.sample.date < latest_date for result in results))
 
     def test_future_bars_do_not_change_query_embedding(self) -> None:
-        rows = make_rows(count=330)
-        query_date = date(2024, 1, 2) + timedelta(days=280)
+        rows = make_rows(count=520)
+        query_date = date(2024, 1, 2) + timedelta(days=450)
         changed_rows = [dict(row) for row in rows]
-        for row in changed_rows[281:]:
+        for row in changed_rows[451:]:
             row["open"] = float(row["open"]) * 1.8
             row["high"] = float(row["high"]) * 1.8
             row["low"] = float(row["low"]) * 1.8

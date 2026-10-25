@@ -34,8 +34,11 @@ class SearchRequest(BaseModel):
     embargo_trading_days: int = Field(default=0, ge=0, le=100)
 
 
-def create_app(data_path: str | Path | None = None) -> FastAPI:
-    config = ProjectConfig.from_env()
+def create_app(
+    data_path: str | Path | None = None,
+    config: ProjectConfig | None = None,
+) -> FastAPI:
+    config = config or ProjectConfig.from_env()
     resolved_data_path = Path(data_path or config.data_path)
     market_data = _load_market_data(resolved_data_path, config)
     web_root = Path(__file__).resolve().parents[2] / "web"
@@ -135,6 +138,7 @@ def create_app(data_path: str | Path | None = None) -> FastAPI:
                 "day": config.day_weight,
             },
             "default_top_k": config.default_top_k,
+            "similarity_temperature": config.similarity_temperature,
         }
 
     @app.post("/api/retrieval/search")

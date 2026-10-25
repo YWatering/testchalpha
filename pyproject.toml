@@ -12,6 +12,7 @@ requires-python = ">=3.10"
 kline-download-a-share = "kline_retrieval.download_cli:main"
 kline-refresh-a-share = "kline_retrieval.refresh_cli:main"
 kline-build-database = "kline_retrieval.database_cli:main"
+kline-import-csmar = "kline_retrieval.csmar_import:main"
 
 [project.optional-dependencies]
 web = [

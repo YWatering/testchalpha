@@ -13,7 +13,7 @@ from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketBar, MarketData
 
 
-SCALE_NAMES = ("monthly", "weekly", "daily", "future_12d")
+SCALE_NAMES = ("monthly", "weekly", "daily", "future")
 
 
 class ChartError(ValueError):
@@ -83,14 +83,14 @@ class SampleBars:
     monthly: tuple[OHLCBar, ...]
     weekly: tuple[OHLCBar, ...]
     daily: tuple[OHLCBar, ...]
-    future_12d: tuple[OHLCBar, ...]
+    future: tuple[OHLCBar, ...]
 
     def as_dict(self) -> dict[str, tuple[OHLCBar, ...]]:
         return {
             "monthly": self.monthly,
             "weekly": self.weekly,
             "daily": self.daily,
-            "future_12d": self.future_12d,
+            "future": self.future,
         }
 
 
@@ -117,14 +117,14 @@ class SampleCharts:
     monthly: GrayscaleImage
     weekly: GrayscaleImage
     daily: GrayscaleImage
-    future_12d: GrayscaleImage
+    future: GrayscaleImage
 
     def as_dict(self) -> dict[str, GrayscaleImage]:
         return {
             "monthly": self.monthly,
             "weekly": self.weekly,
             "daily": self.daily,
-            "future_12d": self.future_12d,
+            "future": self.future,
         }
 
 
@@ -178,7 +178,7 @@ def build_sample_bars(
     trading_date: date | str,
     config: ProjectConfig = DEFAULT_CONFIG,
 ) -> SampleBars:
-    """Build 12 bars for each query scale and 12 future daily bars."""
+    """Build the configured number of bars for each scale and future bars."""
 
     monthly_daily = market_data.get_history(
         symbol, trading_date, config.monthly_period * config.daily_window
@@ -193,7 +193,7 @@ def build_sample_bars(
         monthly=aggregate_ohlc(monthly_daily, config.monthly_period),
         weekly=aggregate_ohlc(weekly_daily, config.weekly_period),
         daily=aggregate_ohlc(daily_daily, 1),
-        future_12d=future_bars,
+        future=future_bars,
     )
 
 
@@ -234,7 +234,7 @@ def build_future_bars(
 
 def render_ohlc(
     bars: Sequence[OHLCBar],
-    size: tuple[int, int] = (36, 36),
+    size: tuple[int, int] = (64, 64),
 ) -> GrayscaleImage:
     """Render OHLC bars as a black-on-white fixed-size image."""
 

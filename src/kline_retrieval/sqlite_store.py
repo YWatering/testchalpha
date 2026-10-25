@@ -18,6 +18,9 @@ CREATE TABLE IF NOT EXISTS daily_bars (
     low REAL NOT NULL,
     close REAL NOT NULL,
     volume REAL,
+    amount REAL,
+    return_rate REAL,
+    pre_close REAL,
     PRIMARY KEY (symbol, date)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_bars_symbol_date
@@ -97,6 +100,7 @@ def write_snapshot(
             connection.execute("PRAGMA journal_mode=WAL")
             connection.execute("PRAGMA synchronous=NORMAL")
             connection.executescript(SCHEMA)
+            _ensure_optional_columns(connection)
             connection.execute("BEGIN IMMEDIATE")
             connection.execute("DELETE FROM daily_bars")
             connection.executemany(
@@ -132,6 +136,8 @@ def read_metadata(database_path: str | Path) -> dict[str, str]:
     path = Path(database_path)
     try:
         with sqlite3.connect(path, timeout=5) as connection:
+            connection.executescript(SCHEMA)
+            _ensure_optional_columns(connection)
             return dict(connection.execute("SELECT key, value FROM dataset_meta"))
     except sqlite3.Error as exc:
         raise OSError(f"读取行情数据库元数据失败: {path}") from exc
@@ -142,6 +148,7 @@ def read_instruments(database_path: str | Path) -> list[dict[str, str]]:
     try:
         with sqlite3.connect(path, timeout=5) as connection:
             connection.executescript(SCHEMA)
+            _ensure_optional_columns(connection)
             rows = connection.execute(
                 """
                 SELECT symbol, name, exchange, board, status
@@ -173,6 +180,7 @@ def load_checkpoint(
     try:
         with sqlite3.connect(path, timeout=10) as connection:
             connection.executescript(SCHEMA)
+            _ensure_optional_columns(connection)
             connection.execute("DELETE FROM sync_checkpoint WHERE run_key <> ?", (run_key,))
             connection.execute("DELETE FROM sync_staging_bars WHERE run_key <> ?", (run_key,))
             connection.commit()
@@ -232,6 +240,7 @@ def stage_symbol(
     try:
         with sqlite3.connect(path, timeout=30) as connection:
             connection.executescript(SCHEMA)
+            _ensure_optional_columns(connection)
             connection.execute("BEGIN IMMEDIATE")
             connection.execute(
                 "DELETE FROM sync_staging_bars WHERE run_key = ? AND symbol = ?",
@@ -268,3 +277,15 @@ def clear_checkpoint(database_path: str | Path, run_key: str) -> None:
             connection.commit()
     except sqlite3.Error as exc:
         raise OSError(f"清理同步断点失败: {path}") from exc
+
+
+def _ensure_optional_columns(connection: sqlite3.Connection) -> None:
+    """Migrate databases created before the CSMAR fields were added."""
+
+    columns = {
+        row[1]
+        for row in connection.execute("PRAGMA table_info(daily_bars)")
+    }
+    for name in ("amount", "return_rate", "pre_close"):
+        if name not in columns:
+            connection.execute(f"ALTER TABLE daily_bars ADD COLUMN {name} REAL")

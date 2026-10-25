@@ -93,7 +93,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
 .chart-frame img { width: min(100%, 210px); aspect-ratio: 1; image-rendering: pixelated; border: 1px solid #d4dcdc; background: #fff; }
 .empty-state { min-height: 110px; display: grid; place-items: center; padding: 25px; color: var(--muted); font-size: 12px; text-align: center; }
 
-.stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 14px; }
+.stats-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 12px; margin-bottom: 14px; }
 .stat-card { padding: 17px 18px; background: var(--paper); border: 1px solid var(--line); border-radius: 6px; }
 .stat-card span { color: var(--muted); font-size: 11px; }
 .stat-card strong { display: block; margin-top: 7px; font-size: 23px; font-variant-numeric: tabular-nums; }
@@ -144,7 +144,7 @@ select:focus, input:focus { border-color: var(--accent); box-shadow: 0 0 0 3px r
   .embargo-field { grid-column: 2; }
   .query-chart-grid { grid-template-columns: 1fr; }
   .chart-frame { min-height: 185px; }
-  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .stats-grid { grid-template-columns: repeat(3, 1fr); }
   .match-chart-grid { grid-template-columns: repeat(2, 1fr); }
 }
 
