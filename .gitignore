@@ -8,5 +8,6 @@ venv/
 .DS_Store
 data/raw/
 data/processed/
+data/processed/cnn_stage11/
 *.sqlite3-shm
 *.sqlite3-wal

@@ -12,6 +12,7 @@ from .market_data import (
     UnknownTradingDateError,
 )
 from .config import DEFAULT_CONFIG, ProjectConfig
+from .cnn import CNNEmbedder, CNNTrainingConfig, build_cnn_sample_embedding, build_split_manifest
 from .charts import (
     ChartError,
     GrayscaleImage,
@@ -82,6 +83,10 @@ __all__ = [
     "MarketDataError",
     "OHLCBar",
     "ProjectConfig",
+    "CNNEmbedder",
+    "CNNTrainingConfig",
+    "build_cnn_sample_embedding",
+    "build_split_manifest",
     "QueryBars",
     "QueryCharts",
     "ColumnProjectionEmbedder",

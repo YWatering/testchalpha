@@ -18,6 +18,8 @@ kline-sync-instrument-names = "kline_retrieval.instrument_names:main"
 kline-plan-a-share-batches = "kline_retrieval.universe_cli:main"
 kline-publish-index-manifest = "kline_retrieval.index_manifest:main"
 kline-build-next-index-batch = "kline_retrieval.batch_index_cli:main"
+kline-train-cnn = "kline_retrieval.cnn_cli:train_main"
+kline-evaluate-cnn = "kline_retrieval.cnn_cli:evaluate_main"
 
 [project.optional-dependencies]
 web = [
@@ -27,6 +29,9 @@ web = [
 ]
 a-share = [
     "akshare>=1.18.88,<2; python_version >= '3.11'",
+]
+cnn = [
+    "torch>=2.4,<3",
 ]
 
 [tool.setuptools.packages.find]

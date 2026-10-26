@@ -3,6 +3,7 @@ import unittest
 from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -56,12 +57,13 @@ class OfflineIndexTests(unittest.TestCase):
             query_date = market.dates("000002")[-21]
             query = build_sample_embedding(market, "000002", query_date, config=config)
             indexed = OfflineFeatureIndex(index_path)
-            indexed_matches, diagnostics = indexed.search(
-                query,
-                market,
-                top_k=5,
-                embargo_trading_days=3,
-            )
+            with patch("kline_retrieval.offline_index.INDEX_SCAN_CHUNK_SIZE", 3):
+                indexed_matches, diagnostics = indexed.search(
+                    query,
+                    market,
+                    top_k=5,
+                    embargo_trading_days=3,
+                )
             scanned = search_market_data(
                 market,
                 "000002",

@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS return_labels (
 );
 """
 
+INDEX_SCAN_CHUNK_SIZE = 65536
+
 
 @dataclass(frozen=True, slots=True)
 class IndexBuildResult:
@@ -279,7 +281,8 @@ class OfflineFeatureIndex:
             raise ValueError("top_k 必须大于 0")
         query_dates = market_data.dates(query.symbol)
         query_index = query_dates.index(query.date)
-        candidate_rows: list[tuple[str, str, bytes, bytes, bytes]] = []
+        ranked_rows: list[tuple[float, tuple[str, str, bytes, bytes, bytes]]] = []
+        candidate_count = 0
         with sqlite3.connect(self.path) as connection:
             cursor = connection.execute(
                 """
@@ -290,32 +293,41 @@ class OfflineFeatureIndex:
                 """,
                 (self.version_id, query.date.isoformat()),
             )
-            for row in cursor:
-                symbol, date_text = row[0], row[1]
-                candidate_date = date.fromisoformat(date_text)
-                if symbol == query.symbol:
-                    try:
-                        distance_in_trading_days = query_index - market_data.dates(symbol).index(candidate_date)
-                    except ValueError:
-                        continue
-                    if distance_in_trading_days <= embargo_trading_days:
-                        continue
-                candidate_rows.append((symbol, date_text, row[2], row[3], row[4]))
+            while True:
+                rows = cursor.fetchmany(INDEX_SCAN_CHUNK_SIZE)
+                if not rows:
+                    break
+                candidate_rows: list[tuple[str, str, bytes, bytes, bytes]] = []
+                for row in rows:
+                    symbol, date_text = row[0], row[1]
+                    candidate_date = date.fromisoformat(date_text)
+                    if symbol == query.symbol:
+                        try:
+                            distance_in_trading_days = query_index - market_data.dates(symbol).index(candidate_date)
+                        except ValueError:
+                            continue
+                        if distance_in_trading_days <= embargo_trading_days:
+                            continue
+                    candidate_rows.append((symbol, date_text, row[2], row[3], row[4]))
+                if not candidate_rows:
+                    continue
 
-        if not candidate_rows:
+                distances = _distance_rows(
+                    query.embeddings,
+                    candidate_rows,
+                    month_weight=month_weight,
+                    week_weight=week_weight,
+                    day_weight=day_weight,
+                )
+                candidate_count += len(candidate_rows)
+                ranked_rows.extend(zip(distances, candidate_rows))
+                ranked_rows.sort(key=lambda item: (item[0], item[1][0], item[1][1]))
+                del ranked_rows[top_k:]
+
+        if not ranked_rows:
             return [], {"index_candidate_count": 0, "index_ms": round((perf_counter() - started) * 1000, 3)}
 
-        distances = _distance_rows(
-            query.embeddings,
-            candidate_rows,
-            month_weight=month_weight,
-            week_weight=week_weight,
-            day_weight=day_weight,
-        )
-        ranked = sorted(
-            zip(distances, candidate_rows),
-            key=lambda item: (item[0], item[1][0], item[1][1]),
-        )[:top_k]
+        ranked = ranked_rows
         matches: list[SimilarityMatch] = []
         for rank, (distance, row) in enumerate(ranked, 1):
             symbol, date_text, monthly, weekly, daily = row
@@ -346,7 +358,7 @@ class OfflineFeatureIndex:
                 )
             )
         return matches, {
-            "index_candidate_count": len(candidate_rows),
+            "index_candidate_count": candidate_count,
             "index_ms": round((perf_counter() - started) * 1000, 3),
         }
 
