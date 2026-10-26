@@ -3,6 +3,7 @@ import hashlib
 import json
 import shutil
 import unittest
+from datetime import date, timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -15,6 +16,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from kline_retrieval.api import app as configured_app, create_app  # noqa: E402
 from kline_retrieval.config import ProjectConfig  # noqa: E402
 from kline_retrieval.sqlite_store import write_snapshot  # noqa: E402
+from kline_retrieval.universe import prepare_universe_batches  # noqa: E402
 
 
 class ApiTests(unittest.TestCase):
@@ -97,6 +99,55 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(first["storage"], "sqlite")
         self.assertEqual(first["source_hash"], "snapshot-1")
         self.assertEqual(second["source_hash"], "snapshot-2")
+
+    def test_sqlite_dropdown_reads_full_universe_when_runtime_load_is_limited(self) -> None:
+        rows = []
+        start = date(2024, 1, 2)
+        for symbol, base in (("000001", 10.0), ("000002", 20.0)):
+            for offset in range(25):
+                close = base + offset * 0.1
+                rows.append(
+                    {
+                        "symbol": symbol,
+                        "date": (start + timedelta(days=offset)).isoformat(),
+                        "open": close,
+                        "high": close + 0.2,
+                        "low": close - 0.2,
+                        "close": close,
+                        "volume": 1000,
+                    }
+                )
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            write_snapshot(
+                database,
+                rows,
+                source_hash="snapshot-universe",
+                manifest={},
+                instruments=[
+                    {"symbol": "000001", "name": "甲", "exchange": "SSE", "board": "MAIN"},
+                    {"symbol": "000002", "name": "乙", "exchange": "SZSE", "board": "MAIN"},
+                ],
+            )
+            config = ProjectConfig(
+                monthly_period=1,
+                weekly_period=1,
+                daily_window=1,
+                future_chart_window=20,
+                chart_width=64,
+                chart_height=64,
+                future_horizons=(1, 5, 10, 20),
+                active_symbols=("000001",),
+            )
+            prepare_universe_batches(database, config=config, batch_size=1)
+            client = TestClient(create_app(database, config=config))
+
+            symbols = client.get("/api/symbols", params={"limit": 100}).json()
+            dates = client.get("/api/dates", params={"symbol": "000002"}).json()
+
+        self.assertEqual(symbols["total"], 2)
+        self.assertEqual([item["symbol"] for item in symbols["instruments"]], ["000001", "000002"])
+        self.assertEqual(len(dates["dates"]), 25)
 
     def test_search_endpoint_returns_charts_matches_and_statistics(self) -> None:
         dates = self.client.get("/api/dates", params={"symbol": "DEMO"}).json()["dates"]

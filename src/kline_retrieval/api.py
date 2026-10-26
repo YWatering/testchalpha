@@ -113,7 +113,8 @@ def create_app(
             coverage = None
         return {
             "status": "ok",
-            "symbols": len(market_data.symbols),
+            "symbols": int((coverage or {}).get("total_symbols", len(market_data.symbols))),
+            "loaded_symbols": len(market_data.symbols),
             "data_path": str(resolved_data_path),
             "source_hash": market_data.source_hash,
             "storage": "sqlite"
@@ -126,6 +127,9 @@ def create_app(
                 if app.state.offline_index is not None
                 else None,
                 "sample_count": app.state.offline_index.sample_count
+                if app.state.offline_index is not None
+                else 0,
+                "indexed_symbols": len(app.state.offline_index.symbols)
                 if app.state.offline_index is not None
                 else 0,
             },
@@ -147,7 +151,6 @@ def create_app(
             try:
                 instruments, total = read_universe_symbols(
                     resolved_data_path,
-                    loaded_symbols=loaded_symbols,
                     query=q,
                     exchange=exchange,
                     board=board,
@@ -159,15 +162,20 @@ def create_app(
                 instruments = []
                 total = 0
             if not instruments and not q and not exchange and not board and not watchlist:
-                instruments = [
-                    item for item in read_instruments(resolved_data_path)
-                    if item["symbol"] in loaded_symbols
-                ][offset : offset + limit]
-                total = len(loaded_symbols)
+                all_instruments = read_instruments(resolved_data_path)
+                total = len(all_instruments)
+                instruments = all_instruments[offset : offset + limit]
         else:
             instruments = [{"symbol": symbol, "name": symbol} for symbol in loaded_symbols[offset : offset + limit]]
             total = len(loaded_symbols)
-        instruments = [item for item in instruments if item["symbol"] in loaded_symbols]
+        indexed_symbols = (
+            set(app.state.offline_index.symbols)
+            if app.state.offline_index is not None
+            else set()
+        )
+        for item in instruments:
+            if item.get("status") == "ready" and indexed_symbols and item["symbol"] not in indexed_symbols:
+                item["status"] = "index_pending"
         return {
             "symbols": [item["symbol"] for item in instruments],
             "instruments": instruments,
@@ -179,7 +187,7 @@ def create_app(
     @app.get("/api/dates")
     def dates(symbol: str = Query(min_length=1)) -> dict[str, object]:
         try:
-            available_dates = current_market_data().dates(symbol)
+            available_dates = _dates_for_symbol(current_market_data(), resolved_data_path, symbol)
         except MarketDataError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return {"symbol": symbol, "dates": [item.isoformat() for item in available_dates]}
@@ -187,7 +195,7 @@ def create_app(
     @app.get("/api/valid-dates")
     def valid_dates(symbol: str = Query(min_length=1)) -> dict[str, object]:
         try:
-            available_dates = current_market_data().dates(symbol)
+            available_dates = _dates_for_symbol(current_market_data(), resolved_data_path, symbol)
         except MarketDataError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         history_count = config.monthly_period * config.daily_window
@@ -228,9 +236,18 @@ def create_app(
         if request.day_weight != 1.0:
             raise HTTPException(status_code=400, detail="日线权重必须固定为 1.0")
         try:
+            market_data = _market_data_for_symbol(market_data, resolved_data_path, request.symbol)
             query_date = date.fromisoformat(request.date)
             diagnostics: dict[str, int | float] = {}
             if app.state.offline_index is not None:
+                if request.symbol not in app.state.offline_index.symbols:
+                    raise HTTPException(
+                        status_code=409,
+                        detail=(
+                            f"股票 {request.symbol} 已在全量下拉列表中，但当前 ColProj 索引尚未覆盖该股票；"
+                            "请等待阶段十全市场分片索引发布后再检索。"
+                        ),
+                    )
                 query = build_sample_embedding(
                     market_data, request.symbol, query_date, config=config
                 )
@@ -351,6 +368,51 @@ def _load_market_data(path: Path, config: ProjectConfig) -> MarketData:
     if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
         return MarketData.from_sqlite(path, symbols=config.active_symbols or None)
     return MarketData.from_file(path)
+
+
+def _market_data_for_symbol(base: MarketData, path: Path, symbol: str) -> MarketData:
+    """Add a lazily loaded symbol to the active in-memory market snapshot."""
+
+    if symbol in base.symbols or path.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
+        return base
+    selected = MarketData.from_sqlite(path, symbols=(symbol,))
+    rows = []
+    for loaded_symbol in base.symbols:
+        rows.extend(
+            {
+                "symbol": bar.symbol,
+                "date": bar.date.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in base.bars(loaded_symbol)
+        )
+    rows.extend(
+        {
+            "symbol": bar.symbol,
+            "date": bar.date.isoformat(),
+            "open": bar.open,
+            "high": bar.high,
+            "low": bar.low,
+            "close": bar.close,
+            "volume": bar.volume,
+        }
+        for bar in selected.bars(symbol)
+    )
+    return MarketData.from_rows(rows, source_path=base.source_path, source_hash=base.source_hash)
+
+
+def _dates_for_symbol(base: MarketData, path: Path, symbol: str) -> tuple[date, ...]:
+    """Read dates for a dropdown-selected symbol without rebuilding the active pool."""
+
+    if symbol in base.symbols:
+        return base.dates(symbol)
+    if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
+        return MarketData.from_sqlite(path, symbols=(symbol,)).dates(symbol)
+    return base.dates(symbol)
 
 
 def _load_offline_index(

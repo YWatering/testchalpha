@@ -318,6 +318,12 @@ class MarketData:
     def symbols(self) -> tuple[str, ...]:
         return tuple(sorted(self._by_symbol))
 
+    def bars(self, symbol: str) -> tuple[MarketBar, ...]:
+        """Return all loaded daily bars for one symbol."""
+
+        self._require_symbol(symbol)
+        return self._by_symbol[symbol]
+
     def dates(self, symbol: str) -> tuple[date, ...]:
         self._require_symbol(symbol)
         return self._dates[symbol]

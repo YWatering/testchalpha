@@ -4,7 +4,6 @@ const state = {
   chartSize: 64,
   sourceHash: null,
   instruments: [],
-  watchlist: new Set(JSON.parse(localStorage.getItem('pattern-atlas-watchlist') || '[]')),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -18,6 +17,11 @@ const formatPercent = (value) => {
 };
 const formatDistance = (value) => Number(value).toFixed(4);
 const chartLabel = { monthly: '月线 · 20D/根', weekly: '周线 · 5D/根', daily: '日线 · 1D/根', future: '未来 · 20D' };
+const statusLabel = {
+  pending: '数据不足',
+  failed: '同步失败',
+  index_pending: '待建立索引',
+};
 
 const symbolName = (symbol) => {
   const item = state.instruments.find((candidate) => candidate.symbol === symbol);
@@ -134,37 +138,17 @@ async function loadDates(symbol, keepCurrent = false) {
   if (!keepCurrent || !dates.includes(dateInput.value)) dateInput.value = dates[dates.length - 1] || '';
 }
 
-function persistWatchlist() {
-  localStorage.setItem('pattern-atlas-watchlist', JSON.stringify([...state.watchlist].sort()));
-}
-
 function renderSymbolOptions(keepCurrent = true) {
-  const search = $('#symbol-search').value.trim().toLowerCase();
-  const exchange = $('#exchange-filter').value;
-  const board = $('#board-filter').value;
-  const watchlistOnly = $('#watchlist-only').checked;
-  const filtered = state.instruments.filter((item) => {
-    const matchesSearch = !search || item.symbol.toLowerCase().includes(search) || String(item.name || '').toLowerCase().includes(search);
-    const matchesExchange = !exchange || item.exchange === exchange;
-    const matchesBoard = !board || item.board === board;
-    const matchesWatchlist = !watchlistOnly || state.watchlist.has(item.symbol);
-    return matchesSearch && matchesExchange && matchesBoard && matchesWatchlist;
-  });
   const symbolInput = $('#symbol-input');
   const current = keepCurrent ? symbolInput.value : '';
-  symbolInput.innerHTML = filtered.map((item) => `<option value="${escapeHtml(item.symbol)}">${escapeHtml(symbolName(item.symbol))}</option>`).join('');
-  if (filtered.some((item) => item.symbol === current)) symbolInput.value = current;
-  $('#universe-count').textContent = `${filtered.length} 只股票`;
-  updateWatchlistButton();
+  symbolInput.innerHTML = state.instruments.map((item) => {
+    const status = item.status && item.status !== 'ready'
+      ? `（${statusLabel[item.status] || item.status}）`
+      : '';
+    return `<option value="${escapeHtml(item.symbol)}">${escapeHtml(symbolName(item.symbol))}${status}</option>`;
+  }).join('');
+  if (state.instruments.some((item) => item.symbol === current)) symbolInput.value = current;
   if (symbolInput.value) loadDates(symbolInput.value, keepCurrent).catch((error) => setNotice(error.message, 'error'));
-}
-
-function updateWatchlistButton() {
-  const symbol = $('#symbol-input').value;
-  const button = $('#watchlist-button');
-  const active = symbol && state.watchlist.has(symbol);
-  button.textContent = active ? '★ 移出自选' : '☆ 加入自选';
-  button.setAttribute('aria-pressed', active ? 'true' : 'false');
 }
 
 async function bootstrap() {
@@ -179,7 +163,10 @@ async function bootstrap() {
     const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
     const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
     const indexName = health.index?.mode?.startsWith('offline_colproj') ? ' · ColProj 离线索引' : '';
-    $('#data-chip').textContent = `${health.symbols} 只股票 · ${sourceName}${adjustName}${storageName}${indexName}`;
+    const indexCoverage = health.index?.indexed_symbols
+      ? ` · 索引 ${health.index.indexed_symbols}/${symbols.total ?? health.symbols}`
+      : '';
+    $('#data-chip').textContent = `${symbols.total ?? health.symbols} 只股票${indexCoverage} · ${sourceName}${adjustName}${storageName}${indexName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;
@@ -188,7 +175,7 @@ async function bootstrap() {
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
     state.instruments = symbols.instruments || (symbols.symbols || []).map((symbol) => ({ symbol, name: symbol }));
     renderSymbolOptions(false);
-    setNotice('选择参数后执行检索。');
+    setNotice(`已加载 ${symbols.total ?? state.instruments.length} 只股票，选择股票和交易日后执行检索。`);
   } catch (error) {
     $('#health-label').textContent = '数据服务异常';
     setNotice(error.message, 'error');
@@ -230,21 +217,7 @@ async function runSearch(event) {
 }
 
 $('#symbol-input').addEventListener('change', () => {
-  updateWatchlistButton();
   loadDates($('#symbol-input').value).catch((error) => setNotice(error.message, 'error'));
-});
-$('#symbol-search').addEventListener('input', () => renderSymbolOptions(false));
-$('#exchange-filter').addEventListener('change', () => renderSymbolOptions(false));
-$('#board-filter').addEventListener('change', () => renderSymbolOptions(false));
-$('#watchlist-only').addEventListener('change', () => renderSymbolOptions(false));
-$('#watchlist-button').addEventListener('click', () => {
-  const symbol = $('#symbol-input').value;
-  if (!symbol) return;
-  if (state.watchlist.has(symbol)) state.watchlist.delete(symbol);
-  else state.watchlist.add(symbol);
-  persistWatchlist();
-  updateWatchlistButton();
-  if ($('#watchlist-only').checked) renderSymbolOptions(false);
 });
 $('#month-weight').addEventListener('input', updateWeights);
 $('#week-weight').addEventListener('input', updateWeights);
