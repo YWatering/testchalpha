@@ -136,6 +136,36 @@ class OfflineIndexTests(unittest.TestCase):
             self.assertEqual(diagnostics["index_candidate_count"], 197)
             self.assertEqual(len(matches), 5)
 
+    def test_api_loads_top_k_match_data_outside_runtime_symbol_subset(self) -> None:
+        rows = make_rows(symbol="000002") + make_rows(symbol="000004", offset=5.0)
+        with TemporaryDirectory() as directory:
+            database = Path(directory) / "market.sqlite3"
+            index_path = Path(directory) / "colproj.sqlite3"
+            write_snapshot(
+                database,
+                rows,
+                source_hash="fixture-source",
+                manifest={"provider": "fixture"},
+            )
+            full_config = ProjectConfig(active_symbols=("000002", "000004"))
+            build_colproj_index(database, index_path, config=full_config)
+            query_date = (date(2024, 1, 2) + timedelta(days=499)).isoformat()
+            runtime_config = ProjectConfig(
+                active_symbols=("000002",),
+                data_path=database,
+                index_path=index_path,
+            )
+            client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(
+                create_app(config=runtime_config)
+            )
+            response = client.post(
+                "/api/retrieval/search",
+                json={"symbol": "000002", "date": query_date, "top_k": 5},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertGreater(response.json()["performance"]["index_candidate_count"], 100)
+
 
 if __name__ == "__main__":
     unittest.main()

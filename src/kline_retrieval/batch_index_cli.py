@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import json
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -35,8 +37,15 @@ def build_next_batch(
     batch_size: int = 200,
     batch_id: str | None = None,
 ) -> dict[str, object]:
-    prepare_universe_batches(database_path, config=config, batch_size=batch_size)
     database = Path(database_path)
+    with sqlite3.connect(database, timeout=30) as connection:
+        connection.executescript(SCHEMA)
+        batch_count = connection.execute(
+            "SELECT COUNT(*) FROM universe_batches"
+        ).fetchone()[0]
+    if not batch_count:
+        prepare_universe_batches(database, config=config, batch_size=batch_size)
+
     with sqlite3.connect(database, timeout=30) as connection:
         connection.executescript(SCHEMA)
         if batch_id:
@@ -82,15 +91,22 @@ def build_next_batch(
             "UPDATE universe_batches SET status='ready', last_error=NULL, updated_at_utc=? WHERE batch_id=?",
             (datetime.now(timezone.utc).isoformat(), selected_id),
         )
-        ready_ids = [
-            (row[0],)
-            for row in connection.execute(
-                "SELECT batch_id FROM universe_batches WHERE status='ready' ORDER BY batch_number"
-            )
-        ]
         connection.commit()
-    ready_paths = [Path(index_dir) / f"{item[0]}.sqlite3" for item in ready_ids if (Path(index_dir) / f"{item[0]}.sqlite3").is_file()]
-    manifest = publish_index_manifest(manifest_path, ready_paths) if ready_paths else None
+
+    with _manifest_publish_lock(manifest_path):
+        with sqlite3.connect(database, timeout=30) as connection:
+            ready_ids = [
+                row[0]
+                for row in connection.execute(
+                    "SELECT batch_id FROM universe_batches WHERE status='ready' ORDER BY batch_number"
+                )
+            ]
+        ready_paths = [
+            Path(index_dir) / f"{item}.sqlite3"
+            for item in ready_ids
+            if (Path(index_dir) / f"{item}.sqlite3").is_file()
+        ]
+        manifest = publish_index_manifest(manifest_path, ready_paths) if ready_paths else None
     return {
         "status": "ready",
         "batch_id": selected_id,
@@ -101,6 +117,20 @@ def build_next_batch(
         "manifest": str(manifest_path) if manifest else None,
         "manifest_content": manifest,
     }
+
+
+@contextmanager
+def _manifest_publish_lock(manifest_path: str | Path):
+    """Serialize manifest reads and writes when batches build in parallel."""
+
+    lock_path = Path(f"{manifest_path}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    with lock_path.open("w", encoding="utf-8") as handle:
+        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -125,4 +155,3 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

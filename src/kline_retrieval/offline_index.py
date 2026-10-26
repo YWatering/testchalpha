@@ -279,7 +279,6 @@ class OfflineFeatureIndex:
             raise ValueError("top_k 必须大于 0")
         query_dates = market_data.dates(query.symbol)
         query_index = query_dates.index(query.date)
-        loaded_symbols = set(market_data.symbols)
         candidate_rows: list[tuple[str, str, bytes, bytes, bytes]] = []
         with sqlite3.connect(self.path) as connection:
             cursor = connection.execute(
@@ -293,8 +292,6 @@ class OfflineFeatureIndex:
             )
             for row in cursor:
                 symbol, date_text = row[0], row[1]
-                if symbol not in loaded_symbols:
-                    continue
                 candidate_date = date.fromisoformat(date_text)
                 if symbol == query.symbol:
                     try:

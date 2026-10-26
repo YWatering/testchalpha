@@ -275,6 +275,11 @@ def create_app(
                     diagnostics=diagnostics,
                 )
                 diagnostics["search_mode"] = "request_scan"
+            market_data = _market_data_for_symbols(
+                market_data,
+                resolved_data_path,
+                {match.sample.symbol for match in matches},
+            )
             analysis = analyze_matches(market_data, matches, config=config)
             query_charts = build_query_charts(
                 market_data,
@@ -373,9 +378,21 @@ def _load_market_data(path: Path, config: ProjectConfig) -> MarketData:
 def _market_data_for_symbol(base: MarketData, path: Path, symbol: str) -> MarketData:
     """Add a lazily loaded symbol to the active in-memory market snapshot."""
 
-    if symbol in base.symbols or path.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
+    return _market_data_for_symbols(base, path, {symbol})
+
+
+def _market_data_for_symbols(
+    base: MarketData,
+    path: Path,
+    symbols: set[str],
+) -> MarketData:
+    """Add missing symbols needed by a query and its Top-K matches."""
+
+    missing = tuple(sorted(symbol for symbol in symbols if symbol not in base.symbols))
+    if not missing or path.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
         return base
-    selected = MarketData.from_sqlite(path, symbols=(symbol,))
+
+    selected = MarketData.from_sqlite(path, symbols=missing)
     rows = []
     for loaded_symbol in base.symbols:
         rows.extend(
@@ -390,18 +407,19 @@ def _market_data_for_symbol(base: MarketData, path: Path, symbol: str) -> Market
             }
             for bar in base.bars(loaded_symbol)
         )
-    rows.extend(
-        {
-            "symbol": bar.symbol,
-            "date": bar.date.isoformat(),
-            "open": bar.open,
-            "high": bar.high,
-            "low": bar.low,
-            "close": bar.close,
-            "volume": bar.volume,
-        }
-        for bar in selected.bars(symbol)
-    )
+    for selected_symbol in selected.symbols:
+        rows.extend(
+            {
+                "symbol": bar.symbol,
+                "date": bar.date.isoformat(),
+                "open": bar.open,
+                "high": bar.high,
+                "low": bar.low,
+                "close": bar.close,
+                "volume": bar.volume,
+            }
+            for bar in selected.bars(selected_symbol)
+        )
     return MarketData.from_rows(rows, source_path=base.source_path, source_hash=base.source_hash)
 
 
