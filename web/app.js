@@ -4,6 +4,8 @@ const state = {
   chartSize: 64,
   sourceHash: null,
   instruments: [],
+  availableModels: ['colproj'],
+  cnnSymbols: new Set(),
 };
 
 const $ = (selector) => document.querySelector(selector);
@@ -105,6 +107,11 @@ function renderDistribution(stat) {
 
 function renderResults(result) {
   const matches = result.matches || [];
+  const model = result.model || {};
+  const modelName = model.name === 'cnn' ? 'CNN · 实验版' : 'ColProj';
+  const modelVersion = model.model_version || '版本未知';
+  const indexVersion = model.index_version || '索引版本未知';
+  $('#query-meta').textContent = `${modelName} · 模型 ${modelVersion} · 索引 ${indexVersion}`;
   $('#result-count').textContent = `${matches.length} 个样本`;
   if (!matches.length) {
     $('#results-table-body').innerHTML = '<tr><td colspan="7" class="table-empty">没有符合条件的历史样本。</td></tr>';
@@ -148,7 +155,21 @@ function renderSymbolOptions(keepCurrent = true) {
     return `<option value="${escapeHtml(item.symbol)}">${escapeHtml(symbolName(item.symbol))}${status}</option>`;
   }).join('');
   if (state.instruments.some((item) => item.symbol === current)) symbolInput.value = current;
+  updateModelAvailability();
   if (symbolInput.value) loadDates(symbolInput.value, keepCurrent).catch((error) => setNotice(error.message, 'error'));
+}
+
+function updateModelAvailability() {
+  const cnnOption = $('#model-input').querySelector('option[value="cnn"]');
+  if (!cnnOption) return;
+  const symbol = $('#symbol-input').value;
+  const supported = state.availableModels.includes('cnn') && state.cnnSymbols.has(symbol);
+  cnnOption.disabled = !supported;
+  cnnOption.textContent = supported ? 'CNN · 128D（实验版）' : 'CNN · 当前股票索引待建';
+  if (!supported && $('#model-input').value === 'cnn') {
+    $('#model-input').value = 'colproj';
+    setNotice(`${symbolName(symbol)} 尚未建立 CNN 索引，已切换为 ColProj。`);
+  }
 }
 
 async function bootstrap() {
@@ -162,18 +183,26 @@ async function bootstrap() {
     const sourceName = dataset.provider === 'akshare' ? `AKShare${endpointName ? ` · ${endpointName}` : ''}` : dataset.provider === 'synthetic' ? '合成演示' : '本地文件';
     const adjustName = dataset.adjust ? ` · ${dataset.adjust}` : '';
     const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
-    const indexName = health.index?.mode?.startsWith('offline_colproj') ? ' · ColProj 离线索引' : '';
+    const indexName = health.models?.colproj?.available ? ' · ColProj 索引' : '';
+    const cnnName = health.models?.cnn?.available ? ' · CNN 索引' : '';
     const indexCoverage = health.index?.indexed_symbols
       ? ` · 索引 ${health.index.indexed_symbols}/${symbols.total ?? health.symbols}`
       : '';
-    $('#data-chip').textContent = `${symbols.total ?? health.symbols} 只股票${indexCoverage} · ${sourceName}${adjustName}${storageName}${indexName}`;
+    $('#data-chip').textContent = `${symbols.total ?? health.symbols} 只股票${indexCoverage} · ${sourceName}${adjustName}${storageName}${indexName}${cnnName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;
     state.horizons = config.future_horizons || state.horizons;
     state.chartSize = Number((config.chart_size || [64])[0]);
+    const availableModels = config.models || ['colproj'];
+    state.availableModels = availableModels;
+    $('#model-input').innerHTML = [
+      '<option value="colproj">ColProj · 64D</option>',
+      `<option value="cnn" ${availableModels.includes('cnn') ? '' : 'disabled'}>${availableModels.includes('cnn') ? 'CNN · 128D（实验版）' : 'CNN · 索引准备中'}</option>`,
+    ].join('');
     $('#horizon-input').innerHTML = state.horizons.map((horizon) => `<option value="${horizon}">未来 ${horizon}D</option>`).join('');
     state.instruments = symbols.instruments || (symbols.symbols || []).map((symbol) => ({ symbol, name: symbol }));
+    state.cnnSymbols = new Set(state.instruments.filter((item) => item.cnn_indexed).map((item) => item.symbol));
     renderSymbolOptions(false);
     setNotice(`已加载 ${symbols.total ?? state.instruments.length} 只股票，选择股票和交易日后执行检索。`);
   } catch (error) {
@@ -187,7 +216,8 @@ async function runSearch(event) {
   const button = $('#search-button');
   button.disabled = true;
   button.textContent = '检索中…';
-  setNotice('正在生成查询图、扫描历史候选并计算未来收益。');
+  const modelLabel = $('#model-input').value === 'cnn' ? 'CNN' : 'ColProj';
+  setNotice(`正在使用 ${modelLabel} 扫描历史候选并计算未来收益。`);
   try {
     const result = await api('/api/retrieval/search', {
       method: 'POST',
@@ -207,7 +237,7 @@ async function runSearch(event) {
     renderResults(result);
     renderStats(Number($('#horizon-input').value));
     const perf = result.performance || {};
-    setNotice(`检索完成：${result.matches.length}/${perf.candidate_count ?? '—'} 个候选 · 检索 ${perf.total_ms ?? '—'} ms / 请求 ${perf.request_ms ?? '—'} ms · 缓存命中 ${perf.cache_hits ?? 0}`, 'success');
+    setNotice(`${modelLabel} 检索完成：${result.matches.length}/${perf.index_candidate_count ?? perf.candidate_count ?? '—'} 个候选 · 索引 ${perf.index_ms ?? perf.total_ms ?? '—'} ms / 请求 ${perf.request_ms ?? '—'} ms`, 'success');
   } catch (error) {
     setNotice(error.message, 'error');
   } finally {
@@ -217,6 +247,7 @@ async function runSearch(event) {
 }
 
 $('#symbol-input').addEventListener('change', () => {
+  updateModelAvailability();
   loadDates($('#symbol-input').value).catch((error) => setNotice(error.message, 'error'));
 });
 $('#month-weight').addEventListener('input', updateWeights);

@@ -145,6 +145,42 @@ class CNNEmbedder:
             daily=self.encode(charts.daily),
         )
 
+    def encode_query_charts_batch(
+        self,
+        charts: Sequence[QueryCharts],
+        *,
+        batch_size: int = 256,
+    ) -> list[SampleEmbeddings]:
+        """Encode three charts per sample in vectorized batches."""
+
+        if batch_size <= 0:
+            raise ValueError("batch_size 必须大于 0")
+        torch, _, _ = _torch()
+        if not charts:
+            return []
+        outputs: list[SampleEmbeddings] = []
+        for start in range(0, len(charts), batch_size):
+            selected = charts[start : start + batch_size]
+            pixels = [
+                image.pixels
+                for item in selected
+                for image in (item.monthly, item.weekly, item.daily)
+            ]
+            values = torch.tensor(pixels, dtype=torch.float32).unsqueeze(1)
+            values = (1.0 - values / 255.0).to(self.device)
+            with torch.no_grad():
+                embeddings = self.functional.normalize(self.model(values), dim=1)
+            embeddings = embeddings.reshape(len(selected), 3, self.dimension).cpu().tolist()
+            outputs.extend(
+                SampleEmbeddings(
+                    monthly=tuple(row[0]),
+                    weekly=tuple(row[1]),
+                    daily=tuple(row[2]),
+                )
+                for row in embeddings
+            )
+        return outputs
+
 
 def build_cnn_sample_embedding(
     market_data: MarketData,
@@ -361,4 +397,3 @@ def _evenly_spaced(values: Sequence[date], limit: int) -> list[date]:
 
 def _json_hash(value: object) -> str:
     return sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
-

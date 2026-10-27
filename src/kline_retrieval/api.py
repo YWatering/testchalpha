@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 
 from .analytics import ReturnAnalysisError, analyze_matches
 from .charts import build_query_charts
+from .cnn import CNNEmbedder, build_cnn_sample_embedding
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
 from .offline_index import CompositeOfflineFeatureIndex, OfflineFeatureIndex
@@ -34,7 +35,7 @@ from .universe import coverage_report, read_universe_symbols
 class SearchRequest(BaseModel):
     symbol: str = Field(min_length=1)
     date: str
-    model: Literal["colproj"] = "colproj"
+    model: Literal["colproj", "cnn"] = "colproj"
     month_weight: float = Field(default=1.0, ge=0.0)
     week_weight: float = Field(default=1.0, ge=0.0)
     day_weight: float = Field(default=1.0, ge=0.0)
@@ -59,6 +60,8 @@ def create_app(
     app.state.market_data_token = _data_token(resolved_data_path)
     app.state.embedding_cache = SampleEmbeddingCache()
     app.state.offline_index = offline_index
+    app.state.cnn_index = _load_offline_index(config.cnn_index_path, market_data, config)
+    app.state.cnn_embedder = _load_cnn_embedder(config.cnn_checkpoint_path)
     app.state.data_reload_lock = RLock()
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
@@ -75,6 +78,9 @@ def create_app(
                     app.state.market_data = _load_market_data(resolved_data_path, config)
                     app.state.offline_index = _load_offline_index(
                         config.index_path, app.state.market_data, config
+                    )
+                    app.state.cnn_index = _load_offline_index(
+                        config.cnn_index_path, app.state.market_data, config
                     )
                     app.state.market_data_token = token
                     app.state.embedding_cache = SampleEmbeddingCache()
@@ -133,6 +139,10 @@ def create_app(
                 if app.state.offline_index is not None
                 else 0,
             },
+            "models": {
+                "colproj": _model_health(app.state.offline_index),
+                "cnn": _model_health(app.state.cnn_index),
+            },
             "coverage": coverage,
         }
 
@@ -146,7 +156,7 @@ def create_app(
         limit: int = Query(default=10_000, ge=1, le=20_000),
     ) -> dict[str, object]:
         loaded_symbols = list(current_market_data().symbols)
-        instruments: list[dict[str, str]] = []
+        instruments: list[dict[str, object]] = []
         if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
             try:
                 instruments, total = read_universe_symbols(
@@ -173,9 +183,16 @@ def create_app(
             if app.state.offline_index is not None
             else set()
         )
+        cnn_symbols = (
+            set(app.state.cnn_index.symbols)
+            if app.state.cnn_index is not None and app.state.cnn_embedder is not None
+            else set()
+        )
         for item in instruments:
             if item.get("status") == "ready" and indexed_symbols and item["symbol"] not in indexed_symbols:
                 item["status"] = "index_pending"
+            item["colproj_indexed"] = item["symbol"] in indexed_symbols
+            item["cnn_indexed"] = item["symbol"] in cnn_symbols
         return {
             "symbols": [item["symbol"] for item in instruments],
             "instruments": instruments,
@@ -214,7 +231,14 @@ def create_app(
     def retrieval_config() -> dict[str, object]:
         return {
             "model": "colproj",
-            "models": ["colproj"],
+            "models": [
+                model
+                for model, index in (
+                    ("colproj", app.state.offline_index),
+                    ("cnn", app.state.cnn_index),
+                )
+                if index is not None and (model != "cnn" or app.state.cnn_embedder is not None)
+            ] or ["colproj"],
             "chart_size": list(config.chart_size),
             "future_horizons": list(config.future_horizons),
             "default_weights": {
@@ -227,6 +251,10 @@ def create_app(
             "index_mode": _index_mode(app.state.offline_index),
             "index_path": str(config.index_path) if config.index_path else None,
             "index_paths": [str(path) for path in _index_paths(config.index_path)],
+            "models_config": {
+                "colproj": _model_health(app.state.offline_index),
+                "cnn": _model_health(app.state.cnn_index),
+            },
         }
 
     @app.post("/api/retrieval/search")
@@ -239,19 +267,41 @@ def create_app(
             market_data = _market_data_for_symbol(market_data, resolved_data_path, request.symbol)
             query_date = date.fromisoformat(request.date)
             diagnostics: dict[str, int | float] = {}
-            if app.state.offline_index is not None:
-                if request.symbol not in app.state.offline_index.symbols:
+            selected_index = (
+                app.state.cnn_index if request.model == "cnn" else app.state.offline_index
+            )
+            if request.model == "cnn" and selected_index is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="CNN 全市场索引尚未完成或当前未配置，请先完成 CNN 分片构建。",
+                )
+            if selected_index is not None:
+                if request.symbol not in selected_index.symbols:
                     raise HTTPException(
                         status_code=409,
                         detail=(
-                            f"股票 {request.symbol} 已在全量下拉列表中，但当前 ColProj 索引尚未覆盖该股票；"
-                            "请等待阶段十全市场分片索引发布后再检索。"
+                            f"股票 {request.symbol} 尚未进入所选 {request.model} 索引覆盖范围；"
+                            "请等待对应模型的全市场分片发布后再检索。"
                         ),
                     )
-                query = build_sample_embedding(
-                    market_data, request.symbol, query_date, config=config
-                )
-                matches, index_diagnostics = app.state.offline_index.search(
+                if request.model == "cnn":
+                    if app.state.cnn_embedder is None:
+                        raise HTTPException(
+                            status_code=503,
+                            detail="CNN 检查点未配置，请设置 KLINE_CNN_CHECKPOINT_PATH。",
+                        )
+                    query = build_cnn_sample_embedding(
+                        market_data,
+                        request.symbol,
+                        query_date,
+                        app.state.cnn_embedder,
+                        config=config,
+                    )
+                else:
+                    query = build_sample_embedding(
+                        market_data, request.symbol, query_date, config=config
+                    )
+                matches, index_diagnostics = selected_index.search(
                     query,
                     market_data,
                     month_weight=request.month_weight,
@@ -260,7 +310,7 @@ def create_app(
                     embargo_trading_days=request.embargo_trading_days,
                 )
                 diagnostics.update(index_diagnostics)
-                diagnostics["search_mode"] = "offline_colproj"
+                diagnostics["search_mode"] = f"offline_{request.model}"
             else:
                 matches = search_market_data(
                     market_data,
@@ -314,6 +364,14 @@ def create_app(
                 "charts": _encode_charts(query_charts.as_dict()),
             },
             "parameters": request.model_dump(),
+            "model": {
+                "name": request.model,
+                "model_version": selected_index.model_version if selected_index is not None else None,
+                "index_version": selected_index.version_id if selected_index is not None else None,
+                "checkpoint_sha256": (
+                    selected_index.checkpoint_sha256 if selected_index is not None else None
+                ),
+            },
             "matches": match_payload,
             "performance": diagnostics,
             "statistics": {
@@ -448,6 +506,28 @@ def _load_offline_index(
     return index if index.is_compatible(market_data.source_hash, config) else None
 
 
+def _load_cnn_embedder(checkpoint_path: Path | None) -> CNNEmbedder | None:
+    if checkpoint_path is None or not checkpoint_path.is_file():
+        return None
+    try:
+        return CNNEmbedder(checkpoint_path)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
+def _model_health(index: OfflineFeatureIndex | CompositeOfflineFeatureIndex | None) -> dict[str, object]:
+    return {
+        "available": index is not None,
+        "mode": _index_mode(index),
+        "version_id": index.version_id if index is not None else None,
+        "sample_count": index.sample_count if index is not None else 0,
+        "indexed_symbols": len(index.symbols) if index is not None else 0,
+        "model": getattr(index, "model", None),
+        "dimension": getattr(index, "dimension", None),
+        "model_version": getattr(index, "model_version", None),
+    }
+
+
 def _index_paths(index_path: Path | None) -> tuple[Path, ...]:
     if index_path is None:
         return ()
@@ -469,6 +549,6 @@ def _index_paths(index_path: Path | None) -> tuple[Path, ...]:
 def _index_mode(index: object | None) -> str:
     if index is None:
         return "request_scan"
-    if isinstance(index, CompositeOfflineFeatureIndex):
-        return "offline_colproj_sharded"
-    return "offline_colproj"
+    model = getattr(index, "model", "colproj")
+    sharded = isinstance(index, CompositeOfflineFeatureIndex)
+    return f"offline_{model}{'_sharded' if sharded else ''}"

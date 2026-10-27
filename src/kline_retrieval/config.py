@@ -35,6 +35,8 @@ class ProjectConfig:
 
     data_path: Path = Path("data/demo_market_data.csv")
     index_path: Path | None = None
+    cnn_index_path: Path | None = None
+    cnn_checkpoint_path: Path | None = None
     monthly_period: int = 20
     weekly_period: int = 5
     daily_window: int = 20
@@ -53,6 +55,10 @@ class ProjectConfig:
         object.__setattr__(self, "data_path", Path(self.data_path))
         if self.index_path is not None:
             object.__setattr__(self, "index_path", Path(self.index_path))
+        if self.cnn_index_path is not None:
+            object.__setattr__(self, "cnn_index_path", Path(self.cnn_index_path))
+        if self.cnn_checkpoint_path is not None:
+            object.__setattr__(self, "cnn_checkpoint_path", Path(self.cnn_checkpoint_path))
         object.__setattr__(self, "active_symbols", tuple(self.active_symbols))
         _positive_int(self.monthly_period, "monthly_period")
         _positive_int(self.weekly_period, "weekly_period")
@@ -82,6 +88,8 @@ class ProjectConfig:
         return cls(
             data_path=env.get("KLINE_DATA_PATH", str(defaults.data_path)),
             index_path=env.get("KLINE_INDEX_PATH") or defaults.index_path,
+            cnn_index_path=env.get("KLINE_CNN_INDEX_PATH") or defaults.cnn_index_path,
+            cnn_checkpoint_path=env.get("KLINE_CNN_CHECKPOINT_PATH") or defaults.cnn_checkpoint_path,
             monthly_period=int(env.get("KLINE_MONTHLY_PERIOD", defaults.monthly_period)),
             weekly_period=int(env.get("KLINE_WEEKLY_PERIOD", defaults.weekly_period)),
             daily_window=int(env.get("KLINE_DAILY_WINDOW", defaults.daily_window)),
@@ -120,6 +128,10 @@ class ProjectConfig:
         values = asdict(self)
         values["data_path"] = str(self.data_path)
         values["index_path"] = str(self.index_path) if self.index_path else None
+        values["cnn_index_path"] = str(self.cnn_index_path) if self.cnn_index_path else None
+        values["cnn_checkpoint_path"] = (
+            str(self.cnn_checkpoint_path) if self.cnn_checkpoint_path else None
+        )
         return values
 
 

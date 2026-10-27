@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框现在直接加载本地数据库中的全部 5,428 只股票代码和名称，页面只通过下拉窗口选择股票，并显示数据状态；搜索股票、交易所、板块和自选股控件已移除；28 个 ColProj 分片已生成，覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本。阶段 10-D 的全量检索性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成；按产品要求，阶段 12 将继续建设全市场 CNN 索引，并提供用户主动选择 ColProj 或 CNN 的功能，对照分数不作为是否接入的门槛。
+阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖全部 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换；每日增量与回滚属于后续运维增强。
 
 阶段 0 交付内容：
 
@@ -166,6 +166,35 @@ KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
 KLINE_INDEX_PATH=data/processed/colproj_stage10.json \
   .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
 ```
+
+### 阶段十二：CNN 分片试建与双模型切换
+
+安装可选 CNN 依赖后，按 ColProj 清单中的批次构建相同样本的 CNN 128 维向量。每次处理一个批次；批次中断后重跑会跳过已经写入的样本。构建全市场前请检查磁盘空间，CNN 索引是 ColProj 索引之外的额外存储。
+
+```bash
+.venv/bin/pip install -e '.[cnn]'
+.venv/bin/kline-build-cnn-shard \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --colproj-manifest data/processed/colproj_stage10.json \
+  --checkpoint data/processed/cnn_stage11/cnn_stage11.pt \
+  --batch-id a-share-0001 \
+  --batch-size 256 \
+  --device mps
+```
+
+CNN 结果与 ColProj 分开查询，API 不会在 CNN 索引缺失时静默切回 ColProj。网页仅在 CNN 索引和检查点均加载成功时开放该选项；当前 `cnn-stage11-v1` 是仅以少量样本训练的实验原型。检查点、行情数据库及 CNN 向量索引均为本地数据，不提交 GitHub。
+
+启动时同时配置两种模型：
+
+```bash
+KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
+KLINE_INDEX_PATH=data/processed/colproj_stage10.json \
+KLINE_CNN_INDEX_PATH=data/processed/cnn_stage12.json \
+KLINE_CNN_CHECKPOINT_PATH=data/processed/cnn_stage11/cnn_stage11.pt \
+  .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
+```
+
+当前本地 CNN 清单为28/28分片，覆盖全部5,428只股票；CNN 索引与检查点约占16GB。检查点、行情数据库及 CNN 向量索引均为本地数据，不提交 GitHub。
 
 阶段十试做版新增接口（股票搜索和筛选接口不作为最终页面入口）：
 

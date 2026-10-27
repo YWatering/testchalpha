@@ -261,9 +261,14 @@ class OfflineFeatureIndex:
         self.model = selected[4]
         self.dimension = int(selected[5])
         self.sample_count = int(selected[7])
+        self.model_version = str(self.config.get("model_version", self.model))
+        self.checkpoint_sha256 = self.config.get("checkpoint_sha256")
 
     def is_compatible(self, source_hash: str | None, config: ProjectConfig) -> bool:
-        return self.source_hash == (source_hash or "") and self.config == _index_config(config)
+        expected = _index_config(config, model=self.model, dimension=self.dimension)
+        return self.source_hash == (source_hash or "") and all(
+            self.config.get(key) == value for key, value in expected.items()
+        )
 
     def search(
         self,
@@ -372,10 +377,21 @@ class CompositeOfflineFeatureIndex:
             raise ValueError("至少需要一个索引分片")
         self.indexes = tuple(OfflineFeatureIndex(path) for path in paths)
         first = self.indexes[0]
+        if any(
+            index.model != first.model
+            or index.dimension != first.dimension
+            or index.model_version != first.model_version
+            or index.source_hash != first.source_hash
+            or index.config != first.config
+            for index in self.indexes
+        ):
+            raise ValueError("组合索引中的模型、版本、行情快照或配置不一致")
         self.paths = paths
         self.config = first.config
         self.model = first.model
         self.dimension = first.dimension
+        self.model_version = first.model_version
+        self.checkpoint_sha256 = first.checkpoint_sha256
         self.version_id = "composite-" + sha256(
             "|".join(index.version_id for index in self.indexes).encode("utf-8")
         ).hexdigest()[:16]
@@ -513,7 +529,12 @@ def _unpack_vector(value: bytes) -> tuple[float, ...]:
     return struct.unpack(f"<{len(value) // 4}f", value)
 
 
-def _index_config(config: ProjectConfig) -> dict[str, object]:
+def _index_config(
+    config: ProjectConfig,
+    *,
+    model: str = "colproj",
+    dimension: int | None = None,
+) -> dict[str, object]:
     return {
         "monthly_period": config.monthly_period,
         "weekly_period": config.weekly_period,
@@ -521,8 +542,8 @@ def _index_config(config: ProjectConfig) -> dict[str, object]:
         "future_chart_window": config.future_chart_window,
         "chart_size": list(config.chart_size),
         "future_horizons": list(config.future_horizons),
-        "model": "colproj",
-        "dimension": config.chart_width,
+        "model": model,
+        "dimension": dimension if dimension is not None else config.chart_width,
     }
 
 

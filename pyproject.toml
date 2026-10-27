@@ -20,6 +20,7 @@ kline-publish-index-manifest = "kline_retrieval.index_manifest:main"
 kline-build-next-index-batch = "kline_retrieval.batch_index_cli:main"
 kline-train-cnn = "kline_retrieval.cnn_cli:train_main"
 kline-evaluate-cnn = "kline_retrieval.cnn_cli:evaluate_main"
+kline-build-cnn-shard = "kline_retrieval.cnn_index:main"
 
 [project.optional-dependencies]
 web = [
