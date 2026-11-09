@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import struct
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from hashlib import sha256
@@ -306,7 +307,10 @@ class OfflineFeatureIndex:
         if top_k <= 0:
             raise ValueError("top_k 必须大于 0")
         query_dates = market_data.dates(query.symbol)
-        query_index = query_dates.index(query.date)
+        query_positions = {trading_date: index for index, trading_date in enumerate(query_dates)}
+        query_index = query_positions.get(query.date)
+        if query_index is None:
+            raise ValueError(f"查询日期不在行情数据中: {query.symbol} {query.date}")
         ranked_rows: list[tuple[float, tuple[str, str, bytes, bytes, bytes]]] = []
         candidate_count = 0
         with sqlite3.connect(self.path) as connection:
@@ -315,7 +319,6 @@ class OfflineFeatureIndex:
                 SELECT symbol, date, monthly, weekly, daily
                 FROM samples
                 WHERE version_id = ? AND date < ?
-                ORDER BY date, symbol
                 """,
                 (self.version_id, query.date.isoformat()),
             )
@@ -326,12 +329,11 @@ class OfflineFeatureIndex:
                 candidate_rows: list[tuple[str, str, bytes, bytes, bytes]] = []
                 for row in rows:
                     symbol, date_text = row[0], row[1]
-                    candidate_date = date.fromisoformat(date_text)
                     if symbol == query.symbol:
-                        try:
-                            distance_in_trading_days = query_index - market_data.dates(symbol).index(candidate_date)
-                        except ValueError:
+                        candidate_index = query_positions.get(date.fromisoformat(date_text))
+                        if candidate_index is None:
                             continue
+                        distance_in_trading_days = query_index - candidate_index
                         if distance_in_trading_days <= embargo_trading_days:
                             continue
                     candidate_rows.append((symbol, date_text, row[2], row[3], row[4]))
@@ -346,7 +348,8 @@ class OfflineFeatureIndex:
                     day_weight=day_weight,
                 )
                 candidate_count += len(candidate_rows)
-                ranked_rows.extend(zip(distances, candidate_rows))
+                batch_top = _top_k_rows(distances, candidate_rows, top_k)
+                ranked_rows.extend(batch_top)
                 ranked_rows.sort(key=lambda item: (item[0], item[1][0], item[1][1]))
                 del ranked_rows[top_k:]
 
@@ -444,11 +447,10 @@ class CompositeOfflineFeatureIndex:
         embargo_trading_days: int = 0,
     ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
         started = perf_counter()
-        matches: list[SimilarityMatch] = []
-        candidate_count = 0
-        shard_times = 0.0
-        for index in self.indexes:
-            shard_matches, diagnostics = index.search(
+        def search_shard(
+            index: OfflineFeatureIndex,
+        ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
+            return index.search(
                 query,
                 market_data,
                 month_weight=month_weight,
@@ -457,6 +459,14 @@ class CompositeOfflineFeatureIndex:
                 top_k=top_k,
                 embargo_trading_days=embargo_trading_days,
             )
+
+        with ThreadPoolExecutor(max_workers=min(4, len(self.indexes))) as executor:
+            shard_results = list(executor.map(search_shard, self.indexes))
+
+        matches: list[SimilarityMatch] = []
+        candidate_count = 0
+        shard_times = 0.0
+        for shard_matches, diagnostics in shard_results:
             matches.extend(shard_matches)
             candidate_count += int(diagnostics.get("index_candidate_count", 0))
             shard_times += float(diagnostics.get("index_ms", 0.0))
@@ -523,6 +533,29 @@ def _distance_rows(
         (month_weight * monthly_distance + week_weight * weekly_distance + day_weight * daily_distance)
         / total_weight
     ).tolist()
+
+
+def _top_k_rows(
+    distances: Sequence[float],
+    rows: Sequence[tuple[str, str, bytes, bytes, bytes]],
+    top_k: int,
+) -> list[tuple[float, tuple[str, str, bytes, bytes, bytes]]]:
+    if len(distances) <= top_k:
+        return list(zip(distances, rows))
+    try:
+        import numpy as np
+    except ImportError:
+        return sorted(
+            zip(distances, rows), key=lambda item: (item[0], item[1][0], item[1][1])
+        )[:top_k]
+
+    values = np.asarray(distances)
+    threshold = np.partition(values, top_k - 1)[top_k - 1]
+    candidates = np.flatnonzero(values <= threshold)
+    return sorted(
+        ((float(values[index]), rows[int(index)]) for index in candidates),
+        key=lambda item: (item[0], item[1][0], item[1][1]),
+    )[:top_k]
 
 
 def _insert_batches(

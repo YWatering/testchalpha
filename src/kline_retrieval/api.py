@@ -28,6 +28,7 @@ from .retrieval import (
     build_sample_embedding,
     search_market_data,
 )
+from .result_cache import RetrievalResultCache
 from .sqlite_store import read_instruments, read_metadata
 from .universe import coverage_report, read_universe_symbols
 
@@ -62,6 +63,10 @@ def create_app(
     app.state.offline_index = offline_index
     app.state.cnn_index = _load_offline_index(config.cnn_index_path, market_data, config)
     app.state.cnn_embedder = _load_cnn_embedder(config.cnn_checkpoint_path)
+    cache_path = config.retrieval_cache_path or resolved_data_path.with_name(
+        f"{resolved_data_path.stem}.retrieval-cache.sqlite3"
+    )
+    app.state.retrieval_result_cache = RetrievalResultCache(cache_path)
     app.state.data_reload_lock = RLock()
     app.mount("/static", StaticFiles(directory=web_root), name="static")
 
@@ -260,6 +265,21 @@ def create_app(
             },
         }
 
+    @app.get("/api/retrieval/cache")
+    def retrieval_cache_status() -> dict[str, object]:
+        return {
+            "path": str(cache_path),
+            "cache": app.state.retrieval_result_cache.status(),
+            "models": {
+                "colproj": _cache_model_status(
+                    app.state.retrieval_result_cache, app.state.offline_index
+                ),
+                "cnn": _cache_model_status(
+                    app.state.retrieval_result_cache, app.state.cnn_index
+                ),
+            },
+        }
+
     @app.post("/api/retrieval/search")
     def search(request: SearchRequest) -> dict[str, object]:
         request_started = perf_counter()
@@ -287,33 +307,65 @@ def create_app(
                             "请等待对应模型的全市场分片发布后再检索。"
                         ),
                     )
-                if request.model == "cnn":
-                    if app.state.cnn_embedder is None:
-                        raise HTTPException(
-                            status_code=503,
-                            detail="CNN 检查点未配置，请设置 KLINE_CNN_CHECKPOINT_PATH。",
-                        )
-                    query = build_cnn_sample_embedding(
-                        market_data,
-                        request.symbol,
-                        query_date,
-                        app.state.cnn_embedder,
-                        config=config,
-                    )
-                else:
-                    query = build_sample_embedding(
-                        market_data, request.symbol, query_date, config=config
-                    )
-                matches, index_diagnostics = selected_index.search(
-                    query,
-                    market_data,
-                    month_weight=request.month_weight,
-                    week_weight=request.week_weight,
-                    top_k=request.top_k,
-                    embargo_trading_days=request.embargo_trading_days,
+                cache_parameters = {
+                    "month_weight": request.month_weight,
+                    "week_weight": request.week_weight,
+                    "day_weight": request.day_weight,
+                    "top_k": request.top_k,
+                    "embargo_trading_days": request.embargo_trading_days,
+                }
+                cached_matches = app.state.retrieval_result_cache.get(
+                    model=request.model,
+                    index_version=selected_index.version_id,
+                    source_hash=selected_index.source_hash,
+                    symbol=request.symbol,
+                    query_date=query_date,
+                    parameters=cache_parameters,
                 )
-                diagnostics.update(index_diagnostics)
-                diagnostics["search_mode"] = f"offline_{request.model}"
+                if cached_matches is not None:
+                    matches = cached_matches
+                    diagnostics["result_cache_hit"] = 1
+                    diagnostics["search_mode"] = f"materialized_{request.model}"
+                    diagnostics["index_candidate_count"] = 0
+                    diagnostics["index_ms"] = 0.0
+                else:
+                    if request.model == "cnn":
+                        if app.state.cnn_embedder is None:
+                            raise HTTPException(
+                                status_code=503,
+                                detail="CNN 检查点未配置，请设置 KLINE_CNN_CHECKPOINT_PATH。",
+                            )
+                        query = build_cnn_sample_embedding(
+                            market_data,
+                            request.symbol,
+                            query_date,
+                            app.state.cnn_embedder,
+                            config=config,
+                        )
+                    else:
+                        query = build_sample_embedding(
+                            market_data, request.symbol, query_date, config=config
+                        )
+                    matches, index_diagnostics = selected_index.search(
+                        query,
+                        market_data,
+                        month_weight=request.month_weight,
+                        week_weight=request.week_weight,
+                        top_k=request.top_k,
+                        embargo_trading_days=request.embargo_trading_days,
+                    )
+                    app.state.retrieval_result_cache.put(
+                        matches,
+                        model=request.model,
+                        index_version=selected_index.version_id,
+                        source_hash=selected_index.source_hash,
+                        symbol=request.symbol,
+                        query_date=query_date,
+                        parameters=cache_parameters,
+                    )
+                    diagnostics.update(index_diagnostics)
+                    diagnostics["result_cache_hit"] = 0
+                    diagnostics["search_mode"] = f"offline_{request.model}"
             else:
                 matches = search_market_data(
                     market_data,
@@ -572,6 +624,23 @@ def _model_health(index: OfflineFeatureIndex | CompositeOfflineFeatureIndex | No
         "model": getattr(index, "model", None),
         "dimension": getattr(index, "dimension", None),
         "model_version": getattr(index, "model_version", None),
+    }
+
+
+def _cache_model_status(
+    cache: RetrievalResultCache,
+    index: OfflineFeatureIndex | CompositeOfflineFeatureIndex | None,
+) -> dict[str, object]:
+    if index is None:
+        return {"available": False, "cached_query_count": 0, "index_version": None}
+    return {
+        "available": True,
+        "cached_query_count": cache.status(
+            model=index.model, index_version=index.version_id
+        )["cached_query_count"],
+        "target_sample_count": index.sample_count,
+        "index_version": index.version_id,
+        "source_hash": index.source_hash,
     }
 
 

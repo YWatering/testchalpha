@@ -116,6 +116,24 @@ class OfflineIndexTests(unittest.TestCase):
             self.assertEqual(
                 response.json()["performance"]["search_mode"], "offline_colproj"
             )
+            first_payload = response.json()
+            second_response = client.post(
+                "/api/retrieval/search",
+                json={
+                    "symbol": "000002",
+                    "date": query_date.isoformat(),
+                    "top_k": 3,
+                    "embargo_trading_days": 3,
+                },
+            )
+            self.assertEqual(second_response.status_code, 200)
+            second_payload = second_response.json()
+            self.assertEqual(second_payload["performance"]["search_mode"], "materialized_colproj")
+            self.assertEqual(second_payload["performance"]["result_cache_hit"], 1)
+            self.assertEqual(second_payload["performance"]["index_candidate_count"], 0)
+            self.assertEqual(first_payload["matches"], second_payload["matches"])
+            cache_status = client.get("/api/retrieval/cache").json()
+            self.assertEqual(cache_status["models"]["colproj"]["cached_query_count"], 1)
 
     def test_composite_index_merges_shards_and_reranks_globally(self) -> None:
         rows = make_rows(symbol="000002") + make_rows(symbol="000004", offset=5.0)
