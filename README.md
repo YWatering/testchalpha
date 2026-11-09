@@ -227,7 +227,7 @@ ANN 试点需要安装可选依赖：
   --output data/processed/stage14_ann/colproj-0001
 ```
 
-候选召回评估需要同时指定行情数据库；ANN 结果只用于候选召回和精确重排，当前不会自动替换网站默认检索路径：
+候选召回评估需要同时指定行情数据库；ANN 结果只用于离线候选召回和精确重排，当前不会自动替换网站默认检索路径。由于 macOS 上 FAISS 与 PyTorch 可能加载不同的 OpenMP runtime，当前不在同一个 FastAPI 进程内直接启用 ANN；正式接入需要独立 ANN worker/服务或统一运行时。
 
 ```bash
 .venv/bin/python -m kline_retrieval.ann_index evaluate \

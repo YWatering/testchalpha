@@ -14,10 +14,149 @@ from typing import Sequence
 import numpy as np
 
 from .offline_index import OfflineFeatureIndex, _unpack_vector
-from .retrieval import SampleEmbeddings, weighted_distance
+from .retrieval import RetrievalSample, SampleEmbeddings, SimilarityMatch, weighted_distance
 
 
 SCALES = ("monthly", "weekly", "daily")
+
+
+class MultiScaleANNIndex:
+    """Optional multi-shard ANN candidate layer with exact weighted reranking."""
+
+    def __init__(self, manifest_path: str | Path, *, candidate_k: int = 10_000, nprobe: int = 64) -> None:
+        try:
+            import faiss
+        except ImportError as exc:
+            raise RuntimeError("安装 ANN 依赖: pip install -e '.[ann]'") from exc
+        self.manifest_path = Path(manifest_path)
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        if manifest.get("format") != "kline-ann-manifest-v1":
+            raise ValueError("ANN 清单格式不受支持")
+        shards = manifest.get("shards", [])
+        if not shards:
+            raise ValueError("ANN 清单没有分片")
+        self.model = str(manifest["model"])
+        self.source_hash = str(manifest["source_hash"])
+        self.dimension = int(manifest["dimension"])
+        self.model_version = str(manifest.get("model_version", self.model))
+        self.version_id = str(manifest["version_id"])
+        self.checkpoint_sha256 = manifest.get("checkpoint_sha256")
+        self.candidate_k = int(candidate_k)
+        self.nprobe = int(nprobe)
+        self._shards: list[dict[str, object]] = []
+        symbols: set[str] = set()
+        sample_count = 0
+        for shard in shards:
+            source = _resolve_manifest_path(self.manifest_path, shard["source"])
+            ann_dir = _resolve_manifest_path(self.manifest_path, shard["ann"])
+            shard_manifest = json.loads((ann_dir / "manifest.json").read_text(encoding="utf-8"))
+            if shard_manifest.get("source_hash") != self.source_hash:
+                raise ValueError("ANN 分片行情快照不一致")
+            indexes = {scale: faiss.read_index(str(ann_dir / f"{scale}.faiss")) for scale in SCALES}
+            for index in indexes.values():
+                index.nprobe = min(self.nprobe, index.nlist)
+            with sqlite3.connect(source) as connection:
+                feature = connection.execute(
+                    "SELECT symbols_json, sample_count FROM feature_versions WHERE version_id=?",
+                    (shard_manifest["version_id"],),
+                ).fetchone()
+            if feature is None:
+                raise ValueError(f"ANN 源分片没有对应 ready 版本: {source}")
+            symbols.update(json.loads(feature[0]))
+            sample_count += int(feature[1])
+            self._shards.append(
+                {"source": source, "version_id": shard_manifest["version_id"], "indexes": indexes}
+            )
+        self.symbols = tuple(sorted(symbols))
+        self.sample_count = sample_count
+
+    def is_compatible(self, source_hash: str | None, config: object, *, price_basis: str | None = None) -> bool:
+        return self.source_hash == (source_hash or "")
+
+    def search(
+        self,
+        query: RetrievalSample,
+        market_data: object,
+        *,
+        month_weight: float = 1.0,
+        week_weight: float = 1.0,
+        day_weight: float = 1.0,
+        top_k: int = 20,
+        embargo_trading_days: int = 0,
+    ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
+        started = perf_counter()
+        query_vectors = (query.embeddings.monthly, query.embeddings.weekly, query.embeddings.daily)
+        query_dates = market_data.dates(query.symbol)
+        query_positions = {trading_date: index for index, trading_date in enumerate(query_dates)}
+        query_index = query_positions.get(query.date)
+        if query_index is None:
+            raise ValueError(f"查询日期不在行情数据中: {query.symbol} {query.date}")
+        candidates: list[tuple[float, str, str, SampleEmbeddings]] = []
+        candidate_count = 0
+        for shard in self._shards:
+            indexes = shard["indexes"]
+            candidate_ids: set[int] = set()
+            for scale, vector in zip(SCALES, query_vectors):
+                _, ids = indexes[scale].search(
+                    np.asarray(vector, dtype=np.float32).reshape(1, -1), self.candidate_k
+                )
+                candidate_ids.update(int(item) for item in ids[0] if item >= 0)
+            if not candidate_ids:
+                continue
+            source = shard["source"]
+            version_id = shard["version_id"]
+            ordered_ids = sorted(candidate_ids)
+            with sqlite3.connect(source) as connection:
+                for start in range(0, len(ordered_ids), 500):
+                    batch = ordered_ids[start : start + 500]
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = connection.execute(
+                        f"SELECT rowid, symbol, date, monthly, weekly, daily FROM samples "
+                        f"WHERE version_id=? AND rowid IN ({placeholders})",
+                        (version_id, *batch),
+                    ).fetchall()
+                    candidate_count += len(rows)
+                    for _, symbol, date_text, monthly, weekly, daily in rows:
+                        candidate_date = date.fromisoformat(date_text)
+                        if candidate_date >= query.date:
+                            continue
+                        if symbol == query.symbol:
+                            candidate_index = query_positions.get(candidate_date)
+                            if candidate_index is None or query_index - candidate_index <= embargo_trading_days:
+                                continue
+                        embeddings = SampleEmbeddings(
+                            _unpack_vector(monthly), _unpack_vector(weekly), _unpack_vector(daily)
+                        )
+                        distances = weighted_distance(
+                            query.embeddings,
+                            embeddings,
+                            month_weight=month_weight,
+                            week_weight=week_weight,
+                            day_weight=day_weight,
+                        )
+                        candidates.append((distances[0], symbol, date_text, embeddings))
+        candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+        matches = [
+            SimilarityMatch(
+                rank=rank,
+                sample=RetrievalSample(symbol, date.fromisoformat(date_text), embeddings),
+                distance=distance,
+                monthly_distance=weighted_distance(query.embeddings, embeddings, month_weight=1, week_weight=0, day_weight=0)[1],
+                weekly_distance=weighted_distance(query.embeddings, embeddings, month_weight=0, week_weight=1, day_weight=0)[2],
+                daily_distance=weighted_distance(query.embeddings, embeddings, month_weight=0, week_weight=0, day_weight=1)[3],
+            )
+            for rank, (distance, symbol, date_text, embeddings) in enumerate(candidates[:top_k], 1)
+        ]
+        return matches, {
+            "ann_candidate_count": candidate_count,
+            "ann_shard_count": len(self._shards),
+            "ann_ms": round((perf_counter() - started) * 1000, 3),
+        }
+
+
+def _resolve_manifest_path(manifest_path: Path, value: str) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else (manifest_path.parent / path).resolve()
 
 
 def build_faiss_shard(

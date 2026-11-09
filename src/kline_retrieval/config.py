@@ -38,6 +38,10 @@ class ProjectConfig:
     cnn_index_path: Path | None = None
     cnn_checkpoint_path: Path | None = None
     retrieval_cache_path: Path | None = None
+    ann_index_path: Path | None = None
+    cnn_ann_index_path: Path | None = None
+    ann_candidate_k: int = 10_000
+    ann_nprobe: int = 64
     monthly_period: int = 20
     weekly_period: int = 5
     daily_window: int = 20
@@ -63,6 +67,10 @@ class ProjectConfig:
             object.__setattr__(self, "cnn_checkpoint_path", Path(self.cnn_checkpoint_path))
         if self.retrieval_cache_path is not None:
             object.__setattr__(self, "retrieval_cache_path", Path(self.retrieval_cache_path))
+        if self.ann_index_path is not None:
+            object.__setattr__(self, "ann_index_path", Path(self.ann_index_path))
+        if self.cnn_ann_index_path is not None:
+            object.__setattr__(self, "cnn_ann_index_path", Path(self.cnn_ann_index_path))
         object.__setattr__(self, "active_symbols", tuple(self.active_symbols))
         if self.price_basis not in {"active", "raw", "reconstructed"}:
             raise ValueError("price_basis 必须是 active、raw 或 reconstructed")
@@ -73,6 +81,8 @@ class ProjectConfig:
         _positive_int(self.chart_width, "chart_width")
         _positive_int(self.chart_height, "chart_height")
         _positive_int(self.default_top_k, "default_top_k")
+        _positive_int(self.ann_candidate_k, "ann_candidate_k")
+        _positive_int(self.ann_nprobe, "ann_nprobe")
 
         if not self.future_horizons or any(horizon <= 0 for horizon in self.future_horizons):
             raise ValueError("future_horizons 必须包含正整数")
@@ -97,6 +107,10 @@ class ProjectConfig:
             cnn_index_path=env.get("KLINE_CNN_INDEX_PATH") or defaults.cnn_index_path,
             cnn_checkpoint_path=env.get("KLINE_CNN_CHECKPOINT_PATH") or defaults.cnn_checkpoint_path,
             retrieval_cache_path=env.get("KLINE_RETRIEVAL_CACHE_PATH") or defaults.retrieval_cache_path,
+            ann_index_path=env.get("KLINE_ANN_INDEX_PATH") or defaults.ann_index_path,
+            cnn_ann_index_path=env.get("KLINE_CNN_ANN_INDEX_PATH") or defaults.cnn_ann_index_path,
+            ann_candidate_k=int(env.get("KLINE_ANN_CANDIDATE_K", defaults.ann_candidate_k)),
+            ann_nprobe=int(env.get("KLINE_ANN_NPROBE", defaults.ann_nprobe)),
             monthly_period=int(env.get("KLINE_MONTHLY_PERIOD", defaults.monthly_period)),
             weekly_period=int(env.get("KLINE_WEEKLY_PERIOD", defaults.weekly_period)),
             daily_window=int(env.get("KLINE_DAILY_WINDOW", defaults.daily_window)),
@@ -142,6 +156,10 @@ class ProjectConfig:
         )
         values["retrieval_cache_path"] = (
             str(self.retrieval_cache_path) if self.retrieval_cache_path else None
+        )
+        values["ann_index_path"] = str(self.ann_index_path) if self.ann_index_path else None
+        values["cnn_ann_index_path"] = (
+            str(self.cnn_ann_index_path) if self.cnn_ann_index_path else None
         )
         return values
 
