@@ -218,6 +218,27 @@ KLINE_CNN_CHECKPOINT_PATH=data/processed/cnn_stage11/cnn_stage11.pt \
 
 可选参数包括 `--date-from`、`--date-to`、`--top-k`、`--month-weight`、`--week-weight`、`--embargo-trading-days`、`--index`、`--checkpoint` 和 `--cache`。缓存默认写入行情数据库同目录；真实数据库、索引和缓存均为本地文件，不推送至 GitHub。**目前全市场 6,862,102 个样本仍未物化**：现有实现是精确扫描，大型 `--all` 任务会因预计平方级距离计算而被拒绝；完成 ANN 候选召回率评估之前，不能宣称全市场查询已即时返回。
 
+ANN 试点需要安装可选依赖：
+
+```bash
+.venv/bin/python -m pip install -e '.[ann]'
+.venv/bin/python -m kline_retrieval.ann_index build \
+  --source data/processed/colproj_stage10/a-share-0001.sqlite3 \
+  --output data/processed/stage14_ann/colproj-0001
+```
+
+候选召回评估需要同时指定行情数据库；ANN 结果只用于候选召回和精确重排，当前不会自动替换网站默认检索路径：
+
+```bash
+.venv/bin/python -m kline_retrieval.ann_index evaluate \
+  --source data/processed/colproj_stage10/a-share-0001.sqlite3 \
+  --ann data/processed/stage14_ann/colproj-0001 \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --queries 30 --candidate-k 10000 --nprobe 64
+```
+
+详细试点结果见 [阶段十四验证报告](docs/validation-stage-14.md)。
+
 用下载的数据启动网页：
 
 ```bash

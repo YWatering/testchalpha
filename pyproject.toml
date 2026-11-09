@@ -24,6 +24,7 @@ kline-train-cnn = "kline_retrieval.cnn_cli:train_main"
 kline-evaluate-cnn = "kline_retrieval.cnn_cli:evaluate_main"
 kline-build-cnn-shard = "kline_retrieval.cnn_index:main"
 kline-precompute-retrieval = "kline_retrieval.precompute_cli:main"
+kline-ann-index = "kline_retrieval.ann_index:main"
 
 [project.optional-dependencies]
 web = [
@@ -36,6 +37,9 @@ a-share = [
 ]
 cnn = [
     "torch>=2.4,<3",
+]
+ann = [
+    "faiss-cpu>=1.9,<2",
 ]
 
 [tool.setuptools.packages.find]
