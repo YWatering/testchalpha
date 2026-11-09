@@ -45,21 +45,27 @@ def build_cnn_shard(
             raise ValueError(f"ColProj 分片没有 ready 版本: {colproj_shard_path}")
         colproj_version_id, source_hash, source_config_json, symbols_json, expected_count = feature
         source_config = json.loads(source_config_json)
-        expected_config = _index_config(config)
-        if source_config != expected_config:
-            raise ValueError("ColProj 分片配置与当前行情图像配置不一致")
         symbols = tuple(json.loads(symbols_json))
 
-    market = MarketData.from_sqlite(database_path, symbols=symbols)
+    market = MarketData.from_sqlite(
+        database_path,
+        symbols=symbols,
+        price_basis=config.price_basis,
+    )
     if market.source_hash != source_hash:
         raise ValueError("CNN 输入行情版本与 ColProj 分片版本不一致")
+    if source_config != _index_config(config, price_basis=market.price_basis):
+        raise ValueError("ColProj 分片配置与当前行情图像配置不一致")
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     version_id = f"cnn-{checkpoint_hash[:12]}-{hashlib.sha256(source_hash.encode()).hexdigest()[:10]}-{Path(colproj_shard_path).stem}"
     config_json = json.dumps(
         {
-            **_index_config(config, model="cnn", dimension=embedder.dimension),
+            **_index_config(
+                config, model="cnn", dimension=embedder.dimension,
+                price_basis=market.price_basis,
+            ),
             "model_version": embedder.model_version,
             "checkpoint_sha256": checkpoint_hash,
         },
@@ -222,7 +228,7 @@ def build_manifest(
                 "chart_size": list(config.chart_size),
                 "future_horizons": list(config.future_horizons),
                 "dimension": CNNEmbedder.dimension,
-                "source_config": _index_config(config),
+                "source_config": _index_config(config, price_basis=market.price_basis),
             },
             "indexes": shards,
             "updated_at_utc": datetime.now(timezone.utc).isoformat(),

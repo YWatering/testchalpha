@@ -106,7 +106,11 @@ def build_colproj_index(
     if tuple(config.future_horizons) != (1, 5, 10, 20):
         raise ValueError("阶段九索引要求 future_horizons 固定为 (1, 5, 10, 20)")
     started = perf_counter()
-    source_data = MarketData.from_sqlite(database_path, symbols=symbols)
+    source_data = MarketData.from_sqlite(
+        database_path,
+        symbols=symbols,
+        price_basis=config.price_basis,
+    )
     selected_symbols = tuple(symbols) if symbols else source_data.symbols
     if tuple(selected_symbols) != source_data.symbols:
         selected_symbols = tuple(symbol for symbol in selected_symbols if symbol in source_data.symbols)
@@ -115,8 +119,14 @@ def build_colproj_index(
 
     path = Path(index_path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    version_id = _version_id(config, selected_symbols)
-    config_json = json.dumps(_index_config(config), ensure_ascii=False, sort_keys=True)
+    effective_config = _index_config(config, price_basis=source_data.price_basis)
+    version_id = _version_id(
+        config,
+        selected_symbols,
+        source_hash=source_data.source_hash,
+        price_basis=source_data.price_basis,
+    )
+    config_json = json.dumps(effective_config, ensure_ascii=False, sort_keys=True)
     symbols_json = json.dumps(list(selected_symbols), ensure_ascii=False)
     now = datetime.now(timezone.utc).isoformat()
 
@@ -264,8 +274,19 @@ class OfflineFeatureIndex:
         self.model_version = str(self.config.get("model_version", self.model))
         self.checkpoint_sha256 = self.config.get("checkpoint_sha256")
 
-    def is_compatible(self, source_hash: str | None, config: ProjectConfig) -> bool:
+    def is_compatible(
+        self,
+        source_hash: str | None,
+        config: ProjectConfig,
+        *,
+        price_basis: str | None = None,
+    ) -> bool:
         expected = _index_config(config, model=self.model, dimension=self.dimension)
+        if config.price_basis == "active":
+            expected["price_basis"] = price_basis or "raw"
+            stored_basis = self.config.get("price_basis", "raw")
+            if stored_basis != expected["price_basis"]:
+                return False
         return self.source_hash == (source_hash or "") and all(
             self.config.get(key) == value for key, value in expected.items()
         )
@@ -399,8 +420,17 @@ class CompositeOfflineFeatureIndex:
         self.symbols = tuple(sorted({symbol for index in self.indexes for symbol in index.symbols}))
         self.sample_count = sum(index.sample_count for index in self.indexes)
 
-    def is_compatible(self, source_hash: str | None, config: ProjectConfig) -> bool:
-        return all(index.is_compatible(source_hash, config) for index in self.indexes)
+    def is_compatible(
+        self,
+        source_hash: str | None,
+        config: ProjectConfig,
+        *,
+        price_basis: str | None = None,
+    ) -> bool:
+        return all(
+            index.is_compatible(source_hash, config, price_basis=price_basis)
+            for index in self.indexes
+        )
 
     def search(
         self,
@@ -534,6 +564,7 @@ def _index_config(
     *,
     model: str = "colproj",
     dimension: int | None = None,
+    price_basis: str | None = None,
 ) -> dict[str, object]:
     return {
         "monthly_period": config.monthly_period,
@@ -542,14 +573,25 @@ def _index_config(
         "future_chart_window": config.future_chart_window,
         "chart_size": list(config.chart_size),
         "future_horizons": list(config.future_horizons),
+        "price_basis": price_basis or config.price_basis,
         "model": model,
         "dimension": dimension if dimension is not None else config.chart_width,
     }
 
 
-def _version_id(config: ProjectConfig, symbols: Sequence[str]) -> str:
+def _version_id(
+    config: ProjectConfig,
+    symbols: Sequence[str],
+    *,
+    source_hash: str | None = None,
+    price_basis: str | None = None,
+) -> str:
     payload = json.dumps(
-        {"config": _index_config(config), "symbols": list(symbols)},
+        {
+            "config": _index_config(config, price_basis=price_basis),
+            "source_hash": source_hash or "",
+            "symbols": list(symbols),
+        },
         ensure_ascii=False,
         sort_keys=True,
     ).encode("utf-8")

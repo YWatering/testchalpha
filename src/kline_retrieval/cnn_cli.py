@@ -43,7 +43,9 @@ def train_main(argv: Sequence[str] | None = None) -> int:
         data_path=Path(args.database),
         active_symbols=symbols,
     )
-    market_data = MarketData.from_sqlite(args.database, symbols=symbols)
+    market_data = MarketData.from_sqlite(
+        args.database, symbols=symbols, price_basis=config.price_basis
+    )
     manifest = build_split_manifest(
         market_data,
         symbols,
@@ -84,7 +86,9 @@ def evaluate_main(argv: Sequence[str] | None = None) -> int:
     candidate_items = _balanced_items(manifest["splits"]["test"], args.max_candidates)
     symbols = sorted({item["symbol"] for item in test_items + candidate_items})
     config = ProjectConfig(data_path=Path(args.database), active_symbols=tuple(symbols))
-    market_data = MarketData.from_sqlite(args.database, symbols=symbols)
+    market_data = MarketData.from_sqlite(
+        args.database, symbols=symbols, price_basis=config.price_basis
+    )
     embedder = CNNEmbedder(args.checkpoint)
 
     overlaps: list[float] = []

@@ -123,6 +123,7 @@ def create_app(
             "loaded_symbols": len(market_data.symbols),
             "data_path": str(resolved_data_path),
             "source_hash": market_data.source_hash,
+            "price_basis": market_data.price_basis,
             "storage": "sqlite"
             if resolved_data_path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}
             else "file",
@@ -229,6 +230,7 @@ def create_app(
 
     @app.get("/api/retrieval/config")
     def retrieval_config() -> dict[str, object]:
+        active_market_data = current_market_data()
         return {
             "model": "colproj",
             "models": [
@@ -240,6 +242,7 @@ def create_app(
                 if index is not None and (model != "cnn" or app.state.cnn_embedder is not None)
             ] or ["colproj"],
             "chart_size": list(config.chart_size),
+            "price_basis": active_market_data.price_basis,
             "future_horizons": list(config.future_horizons),
             "default_weights": {
                 "month": config.month_weight,
@@ -358,6 +361,7 @@ def create_app(
             )
 
         response = {
+            "price_basis": market_data.price_basis,
             "query": {
                 "symbol": request.symbol,
                 "date": query_date.isoformat(),
@@ -429,7 +433,11 @@ def _data_token(path: Path) -> tuple[object, ...]:
 
 def _load_market_data(path: Path, config: ProjectConfig) -> MarketData:
     if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
-        return MarketData.from_sqlite(path, symbols=config.active_symbols or None)
+        return MarketData.from_sqlite(
+            path,
+            symbols=config.active_symbols or None,
+            price_basis=config.price_basis,
+        )
     return MarketData.from_file(path)
 
 
@@ -450,7 +458,9 @@ def _market_data_for_symbols(
     if not missing or path.suffix.lower() not in {".sqlite", ".sqlite3", ".db"}:
         return base
 
-    selected = MarketData.from_sqlite(path, symbols=missing)
+    selected = MarketData.from_sqlite(
+        path, symbols=missing, price_basis=base.price_basis
+    )
     rows = []
     for loaded_symbol in base.symbols:
         rows.extend(
@@ -462,6 +472,17 @@ def _market_data_for_symbols(
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "return_rate": bar.return_rate,
+                "pre_close": bar.pre_close,
+                "raw_open": bar.raw_open,
+                "raw_high": bar.raw_high,
+                "raw_low": bar.raw_low,
+                "raw_close": bar.raw_close,
+                "price_basis": bar.price_basis,
+                "reconstruction_status": bar.reconstruction_status,
+                "reconstruction_scale": bar.reconstruction_scale,
+                "reconstruction_anchor_date": bar.reconstruction_anchor_date,
+                "reconstruction_anchor_close": bar.reconstruction_anchor_close,
             }
             for bar in base.bars(loaded_symbol)
         )
@@ -475,10 +496,26 @@ def _market_data_for_symbols(
                 "low": bar.low,
                 "close": bar.close,
                 "volume": bar.volume,
+                "return_rate": bar.return_rate,
+                "pre_close": bar.pre_close,
+                "raw_open": bar.raw_open,
+                "raw_high": bar.raw_high,
+                "raw_low": bar.raw_low,
+                "raw_close": bar.raw_close,
+                "price_basis": bar.price_basis,
+                "reconstruction_status": bar.reconstruction_status,
+                "reconstruction_scale": bar.reconstruction_scale,
+                "reconstruction_anchor_date": bar.reconstruction_anchor_date,
+                "reconstruction_anchor_close": bar.reconstruction_anchor_close,
             }
             for bar in selected.bars(selected_symbol)
         )
-    return MarketData.from_rows(rows, source_path=base.source_path, source_hash=base.source_hash)
+    return MarketData.from_rows(
+        rows,
+        source_path=base.source_path,
+        source_hash=base.source_hash,
+        price_basis=base.price_basis,
+    )
 
 
 def _dates_for_symbol(base: MarketData, path: Path, symbol: str) -> tuple[date, ...]:
@@ -487,7 +524,9 @@ def _dates_for_symbol(base: MarketData, path: Path, symbol: str) -> tuple[date, 
     if symbol in base.symbols:
         return base.dates(symbol)
     if path.suffix.lower() in {".sqlite", ".sqlite3", ".db"}:
-        return MarketData.from_sqlite(path, symbols=(symbol,)).dates(symbol)
+        return MarketData.from_sqlite(
+            path, symbols=(symbol,), price_basis=base.price_basis
+        ).dates(symbol)
     return base.dates(symbol)
 
 
@@ -503,7 +542,15 @@ def _load_offline_index(
         index = OfflineFeatureIndex(paths[0]) if len(paths) == 1 else CompositeOfflineFeatureIndex(paths)
     except (OSError, ValueError, sqlite3.Error):
         return None
-    return index if index.is_compatible(market_data.source_hash, config) else None
+    return (
+        index
+        if index.is_compatible(
+            market_data.source_hash,
+            config,
+            price_basis=market_data.price_basis,
+        )
+        else None
+    )
 
 
 def _load_cnn_embedder(checkpoint_path: Path | None) -> CNNEmbedder | None:

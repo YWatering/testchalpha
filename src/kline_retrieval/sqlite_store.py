@@ -21,6 +21,14 @@ CREATE TABLE IF NOT EXISTS daily_bars (
     amount REAL,
     return_rate REAL,
     pre_close REAL,
+    reconstructed_open REAL,
+    reconstructed_high REAL,
+    reconstructed_low REAL,
+    reconstructed_close REAL,
+    reconstruction_scale REAL,
+    reconstruction_status TEXT,
+    reconstruction_anchor_date TEXT,
+    reconstruction_anchor_close REAL,
     PRIMARY KEY (symbol, date)
 );
 CREATE INDEX IF NOT EXISTS idx_daily_bars_symbol_date
@@ -313,6 +321,19 @@ def _ensure_optional_columns(connection: sqlite3.Connection) -> None:
         row[1]
         for row in connection.execute("PRAGMA table_info(daily_bars)")
     }
-    for name in ("amount", "return_rate", "pre_close"):
+    optional_columns = {
+        "amount": "REAL",
+        "return_rate": "REAL",
+        "pre_close": "REAL",
+        "reconstructed_open": "REAL",
+        "reconstructed_high": "REAL",
+        "reconstructed_low": "REAL",
+        "reconstructed_close": "REAL",
+        "reconstruction_scale": "REAL",
+        "reconstruction_status": "TEXT",
+        "reconstruction_anchor_date": "TEXT",
+        "reconstruction_anchor_close": "REAL",
+    }
+    for name, sql_type in optional_columns.items():
         if name not in columns:
-            connection.execute(f"ALTER TABLE daily_bars ADD COLUMN {name} REAL")
+            connection.execute(f"ALTER TABLE daily_bars ADD COLUMN {name} {sql_type}")

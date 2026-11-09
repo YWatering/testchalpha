@@ -66,6 +66,13 @@ from .offline_index import (
     IndexBuildResult,
     build_colproj_index,
 )
+from .price_reconstruction import (
+    PriceReconstructionError,
+    ReconstructionQuality,
+    ReconstructionResult,
+    materialize_reconstructed_prices,
+    reconstruct_symbol_bars,
+)
 
 __all__ = [
     "DataValidationError",
@@ -81,6 +88,9 @@ __all__ = [
     "MarketBar",
     "MarketData",
     "MarketDataError",
+    "PriceReconstructionError",
+    "ReconstructionQuality",
+    "ReconstructionResult",
     "OHLCBar",
     "ProjectConfig",
     "CNNEmbedder",
@@ -127,5 +137,7 @@ __all__ = [
     "CompositeOfflineFeatureIndex",
     "IndexBuildResult",
     "build_colproj_index",
+    "materialize_reconstructed_prices",
+    "reconstruct_symbol_bars",
     "weighted_distance",
 ]

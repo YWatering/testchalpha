@@ -163,14 +163,16 @@ def calculate_forward_returns(
     values = tuple(
         (
             horizon,
-            future_bars[horizon - 1].close / base_bar.close - 1.0,
+            float(future_bars[horizon - 1].raw_close)
+            / float(base_bar.raw_close)
+            - 1.0,
         )
         for horizon in normalized_horizons
     )
     return ForwardReturns(
         symbol=symbol,
         date=base_bar.date,
-        base_close=base_bar.close,
+        base_close=float(base_bar.raw_close),
         values=values,
     )
 

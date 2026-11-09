@@ -48,7 +48,7 @@ class InsufficientFutureError(MarketDataError):
 
 @dataclass(frozen=True, slots=True)
 class MarketBar:
-    """One validated daily OHLC record."""
+    """One validated daily OHLC record and its optional source metadata."""
 
     symbol: str
     date: date
@@ -57,6 +57,30 @@ class MarketBar:
     low: float
     close: float
     volume: float | None = None
+    return_rate: float | None = None
+    pre_close: float | None = None
+    raw_open: float | None = None
+    raw_high: float | None = None
+    raw_low: float | None = None
+    raw_close: float | None = None
+    price_basis: str = "raw"
+    reconstruction_status: str = "raw"
+    reconstruction_scale: float | None = None
+    reconstruction_anchor_date: date | None = None
+    reconstruction_anchor_close: float | None = None
+
+    def __post_init__(self) -> None:
+        for field in ("raw_open", "raw_high", "raw_low", "raw_close"):
+            if getattr(self, field) is None:
+                object.__setattr__(self, field, float(getattr(self, field[4:])))
+        if self.price_basis not in {"raw", "reconstructed"}:
+            raise DataValidationError(f"不支持的价格口径: {self.price_basis}")
+
+    @property
+    def label_close(self) -> float:
+        """Return the active close used by the current research price basis."""
+
+        return self.close
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,6 +160,18 @@ def _normalize_row(row: Mapping[str, object], row_number: int) -> MarketBar:
             if volume < 0:
                 raise DataValidationError(f"第 {row_number} 行的 volume 不能小于 0")
 
+    def optional_number(field: str) -> float | None:
+        raw = values.get(field)
+        if raw is None or str(raw).strip() == "":
+            return None
+        return _parse_number(raw, field, row_number)
+
+    raw_prices = {
+        field: optional_number(f"raw_{field}")
+        for field in ("open", "high", "low", "close")
+    }
+    anchor_date = values.get("reconstruction_anchor_date")
+
     return MarketBar(
         symbol=symbol,
         date=parsed_date,
@@ -144,6 +180,19 @@ def _normalize_row(row: Mapping[str, object], row_number: int) -> MarketBar:
         low=prices["low"],
         close=prices["close"],
         volume=volume,
+        return_rate=optional_number("return_rate"),
+        pre_close=optional_number("pre_close"),
+        raw_open=raw_prices["open"],
+        raw_high=raw_prices["high"],
+        raw_low=raw_prices["low"],
+        raw_close=raw_prices["close"],
+        price_basis=str(values.get("price_basis", "raw")),
+        reconstruction_status=str(values.get("reconstruction_status", "raw")),
+        reconstruction_scale=optional_number("reconstruction_scale"),
+        reconstruction_anchor_date=(
+            _parse_date(anchor_date) if anchor_date not in (None, "") else None
+        ),
+        reconstruction_anchor_close=optional_number("reconstruction_anchor_close"),
     )
 
 
@@ -156,6 +205,7 @@ class MarketData:
         *,
         source_path: str | None = None,
         source_hash: str | None = None,
+        price_basis: str = "raw",
     ) -> None:
         if not bars:
             raise DataValidationError("行情数据不能为空")
@@ -181,6 +231,7 @@ class MarketData:
         }
         self.source_path = source_path
         self.source_hash = source_hash
+        self.price_basis = price_basis
 
     @classmethod
     def from_rows(
@@ -189,12 +240,18 @@ class MarketData:
         *,
         source_path: str | None = None,
         source_hash: str | None = None,
+        price_basis: str = "raw",
     ) -> "MarketData":
         bars = [_normalize_row(row, row_number) for row_number, row in enumerate(rows, 1)]
-        return cls(bars, source_path=source_path, source_hash=source_hash)
+        return cls(
+            bars,
+            source_path=source_path,
+            source_hash=source_hash,
+            price_basis=price_basis,
+        )
 
     @classmethod
-    def from_csv(cls, path: str | Path) -> "MarketData":
+    def from_csv(cls, path: str | Path, *, price_basis: str = "raw") -> "MarketData":
         file_path = Path(path)
         if not file_path.is_file():
             raise MarketDataError(f"行情文件不存在: {file_path}")
@@ -217,10 +274,11 @@ class MarketData:
             reader,
             source_path=str(file_path),
             source_hash=hashlib.sha256(raw_bytes).hexdigest(),
+            price_basis=price_basis,
         )
 
     @classmethod
-    def from_parquet(cls, path: str | Path) -> "MarketData":
+    def from_parquet(cls, path: str | Path, *, price_basis: str = "raw") -> "MarketData":
         """Load Parquet data through optional pandas/pyarrow dependencies."""
 
         file_path = Path(path)
@@ -244,17 +302,22 @@ class MarketData:
             frame.to_dict(orient="records"),
             source_path=str(file_path),
             source_hash=hashlib.sha256(raw_bytes).hexdigest(),
+            price_basis=price_basis,
         )
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "MarketData":
+    def from_file(cls, path: str | Path, *, price_basis: str = "active") -> "MarketData":
         file_path = Path(path)
         suffix = file_path.suffix.lower()
         if suffix == ".csv":
+            if price_basis not in {"active", "raw"}:
+                raise MarketDataError("CSV 文件不包含预计算的重建 OHLC；请使用 raw 口径")
             return cls.from_csv(file_path)
         if suffix in {".sqlite", ".sqlite3", ".db"}:
-            return cls.from_sqlite(file_path)
+            return cls.from_sqlite(file_path, price_basis=price_basis)
         if suffix in {".parquet", ".pq"}:
+            if price_basis not in {"active", "raw"}:
+                raise MarketDataError("Parquet 文件不包含预计算的重建 OHLC；请使用 raw 口径")
             return cls.from_parquet(file_path)
         raise MarketDataError(f"不支持的行情文件格式: {file_path.suffix or '<无扩展名>'}")
 
@@ -263,55 +326,84 @@ class MarketData:
         cls,
         path: str | Path,
         symbols: Sequence[str] | None = None,
+        *,
+        price_basis: str = "active",
     ) -> "MarketData":
         """Load a validated daily-bar snapshot from SQLite."""
 
         file_path = Path(path)
         if not file_path.is_file():
             raise MarketDataError(f"行情数据库不存在: {file_path}")
+        loaded_source_hash = None
         try:
             with sqlite3.connect(file_path) as connection:
-                if symbols:
-                    placeholders = ",".join("?" for _ in symbols)
-                    rows = connection.execute(
-                        f"""
-                        SELECT symbol, date, open, high, low, close, volume
-                        FROM daily_bars
-                        WHERE symbol IN ({placeholders})
-                        ORDER BY symbol, date
-                        """,
-                        tuple(symbols),
-                    ).fetchall()
-                else:
-                    rows = connection.execute(
-                        """
-                        SELECT symbol, date, open, high, low, close, volume
-                        FROM daily_bars
-                        ORDER BY symbol, date
-                        """
-                    ).fetchall()
                 metadata = dict(
                     connection.execute("SELECT key, value FROM dataset_meta").fetchall()
                 )
+                columns = {
+                    row[1] for row in connection.execute("PRAGMA table_info(daily_bars)")
+                }
+                selected_basis = metadata.get("price_basis") == "return_reconstructed_v1" if price_basis == "active" else price_basis == "reconstructed"
+                if price_basis not in {"active", "raw", "reconstructed"}:
+                    raise MarketDataError(f"不支持的价格口径: {price_basis}")
+                if selected_basis:
+                    required = {"reconstructed_open", "reconstructed_high", "reconstructed_low", "reconstructed_close"}
+                    if not required.issubset(columns):
+                        raise MarketDataError("数据库尚未生成收益率重建 OHLC；请先运行 kline-reconstruct-prices")
+                    if metadata.get("price_basis") != "return_reconstructed_v1":
+                        raise MarketDataError("数据库未激活收益率重建价格口径")
+                    loaded_source_hash = metadata.get("reconstructed_source_hash")
+                    select_fields = """symbol, date, reconstructed_open, reconstructed_high,
+                        reconstructed_low, reconstructed_close, volume, return_rate, pre_close,
+                        open, high, low, close, reconstruction_scale, reconstruction_status,
+                        reconstruction_anchor_date, reconstruction_anchor_close"""
+                else:
+                    select_fields = """symbol, date, open, high, low, close, volume,
+                        return_rate, pre_close"""
+                where = ""
+                parameters: tuple[object, ...] = ()
+                if symbols:
+                    placeholders = ",".join("?" for _ in symbols)
+                    where = f" WHERE symbol IN ({placeholders})"
+                    parameters = tuple(symbols)
+                rows = connection.execute(
+                    f"SELECT {select_fields} FROM daily_bars{where} ORDER BY symbol, date",
+                    parameters,
+                ).fetchall()
         except sqlite3.Error as exc:
             raise MarketDataError(f"读取行情数据库失败: {file_path}") from exc
         if not rows:
             raise DataValidationError("行情数据库没有 daily_bars 数据")
-        return cls.from_rows(
-            (
+        if selected_basis:
+            normalized_rows = (
                 {
-                    "symbol": row[0],
-                    "date": row[1],
-                    "open": row[2],
-                    "high": row[3],
-                    "low": row[4],
-                    "close": row[5],
-                    "volume": row[6],
+                    "symbol": row[0], "date": row[1], "open": row[2], "high": row[3],
+                    "low": row[4], "close": row[5], "volume": row[6],
+                    "return_rate": row[7], "pre_close": row[8],
+                    "raw_open": row[9], "raw_high": row[10], "raw_low": row[11],
+                    "raw_close": row[12], "price_basis": "reconstructed",
+                    "reconstruction_scale": row[13], "reconstruction_status": row[14],
+                    "reconstruction_anchor_date": row[15],
+                    "reconstruction_anchor_close": row[16],
                 }
                 for row in rows
-            ),
+            )
+            loaded_basis = "reconstructed"
+        else:
+            normalized_rows = (
+                {
+                    "symbol": row[0], "date": row[1], "open": row[2], "high": row[3],
+                    "low": row[4], "close": row[5], "volume": row[6],
+                    "return_rate": row[7], "pre_close": row[8],
+                }
+                for row in rows
+            )
+            loaded_basis = "raw"
+        return cls.from_rows(
+            normalized_rows,
             source_path=str(file_path),
-            source_hash=metadata.get("source_hash"),
+            source_hash=loaded_source_hash or metadata.get("source_hash"),
+            price_basis=loaded_basis,
         )
 
     @property

@@ -50,6 +50,7 @@ class ProjectConfig:
     similarity_temperature: float = 0.25
     default_top_k: int = 20
     active_symbols: tuple[str, ...] = ()
+    price_basis: str = "active"
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "data_path", Path(self.data_path))
@@ -60,6 +61,8 @@ class ProjectConfig:
         if self.cnn_checkpoint_path is not None:
             object.__setattr__(self, "cnn_checkpoint_path", Path(self.cnn_checkpoint_path))
         object.__setattr__(self, "active_symbols", tuple(self.active_symbols))
+        if self.price_basis not in {"active", "raw", "reconstructed"}:
+            raise ValueError("price_basis 必须是 active、raw 或 reconstructed")
         _positive_int(self.monthly_period, "monthly_period")
         _positive_int(self.weekly_period, "weekly_period")
         _positive_int(self.daily_window, "daily_window")
@@ -118,6 +121,7 @@ class ProjectConfig:
                 for symbol in env.get("KLINE_ACTIVE_SYMBOLS", "").split(",")
                 if symbol.strip()
             ),
+            price_basis=env.get("KLINE_PRICE_BASIS", defaults.price_basis),
         )
 
     @property

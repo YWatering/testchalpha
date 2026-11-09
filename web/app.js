@@ -2,6 +2,7 @@ const state = {
   result: null,
   horizons: [1, 5, 10, 20],
   chartSize: 64,
+  priceBasis: 'raw',
   sourceHash: null,
   instruments: [],
   availableModels: ['colproj'],
@@ -50,7 +51,8 @@ function setImageCard(name, src) {
 
 function renderQuery(query) {
   $('#query-title').textContent = `${symbolName(query.symbol)} · ${query.date}`;
-  $('#query-meta').textContent = '历史窗口已构建 · 未来图不参与检索';
+  const basisLabel = state.priceBasis === 'reconstructed' ? '价格口径：收益率重建可比价格' : '价格口径：原始 OHLC';
+  $('#query-meta').textContent = `${basisLabel} · 历史窗口已构建 · 未来图不参与检索`;
   $('#query-charts').innerHTML = ['monthly', 'weekly', 'daily']
     .map((name) => setImageCard(name, query.charts[name])).join('');
 }
@@ -185,15 +187,17 @@ async function bootstrap() {
     const storageName = health.storage === 'sqlite' ? ' · SQLite 自动刷新' : '';
     const indexName = health.models?.colproj?.available ? ' · ColProj 索引' : '';
     const cnnName = health.models?.cnn?.available ? ' · CNN 索引' : '';
+    const priceName = health.price_basis === 'reconstructed' ? ' · 收益率重建价格' : ' · 原始 OHLC';
     const indexCoverage = health.index?.indexed_symbols
       ? ` · 索引 ${health.index.indexed_symbols}/${symbols.total ?? health.symbols}`
       : '';
-    $('#data-chip').textContent = `${symbols.total ?? health.symbols} 只股票${indexCoverage} · ${sourceName}${adjustName}${storageName}${indexName}${cnnName}`;
+    $('#data-chip').textContent = `${symbols.total ?? health.symbols} 只股票${indexCoverage} · ${sourceName}${adjustName}${storageName}${priceName}${indexName}${cnnName}`;
     $('#data-chip').title = dataset.data_start_date && dataset.data_end_date
       ? `行情区间 ${dataset.data_start_date} 至 ${dataset.data_end_date} · SHA-256 ${dataset.sha256 || health.source_hash}`
       : `数据文件 SHA-256 ${health.source_hash}`;
     state.horizons = config.future_horizons || state.horizons;
     state.chartSize = Number((config.chart_size || [64])[0]);
+    state.priceBasis = config.price_basis || health.price_basis || 'raw';
     const availableModels = config.models || ['colproj'];
     state.availableModels = availableModels;
     $('#model-input').innerHTML = [
