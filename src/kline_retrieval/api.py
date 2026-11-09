@@ -314,18 +314,46 @@ def create_app(
                     "top_k": request.top_k,
                     "embargo_trading_days": request.embargo_trading_days,
                 }
-                cached_matches = app.state.retrieval_result_cache.get(
-                    model=request.model,
-                    index_version=selected_index.version_id,
-                    source_hash=selected_index.source_hash,
-                    symbol=request.symbol,
-                    query_date=query_date,
-                    parameters=cache_parameters,
-                )
+                cached_matches = None
+                cache_mode: str | None = None
+                cache_identity = None
+                if request.model == "colproj" and config.ann_index_path is not None:
+                    cache_identity = _ann_cache_identity(
+                        config.ann_index_path, selected_index.source_hash
+                    )
+                    if cache_identity is not None:
+                        ann_version, ann_source_hash = cache_identity
+                        ann_parameters = {
+                            **cache_parameters,
+                            "retrieval_engine": "faiss-ann-exact-rerank-v1",
+                            "ann_candidate_k": config.ann_candidate_k,
+                            "ann_nprobe": config.ann_nprobe,
+                        }
+                        cached_matches = app.state.retrieval_result_cache.get(
+                            model="colproj",
+                            index_version=ann_version,
+                            source_hash=ann_source_hash,
+                            symbol=request.symbol,
+                            query_date=query_date,
+                            parameters=ann_parameters,
+                        )
+                        if cached_matches is not None:
+                            cache_mode = "materialized_ann_colproj"
+                if cached_matches is None:
+                    cached_matches = app.state.retrieval_result_cache.get(
+                        model=request.model,
+                        index_version=selected_index.version_id,
+                        source_hash=selected_index.source_hash,
+                        symbol=request.symbol,
+                        query_date=query_date,
+                        parameters=cache_parameters,
+                    )
+                    if cached_matches is not None:
+                        cache_mode = f"materialized_{request.model}"
                 if cached_matches is not None:
                     matches = cached_matches
                     diagnostics["result_cache_hit"] = 1
-                    diagnostics["search_mode"] = f"materialized_{request.model}"
+                    diagnostics["search_mode"] = cache_mode or f"materialized_{request.model}"
                     diagnostics["index_candidate_count"] = 0
                     diagnostics["index_ms"] = 0.0
                 else:
@@ -625,6 +653,22 @@ def _model_health(index: OfflineFeatureIndex | CompositeOfflineFeatureIndex | No
         "dimension": getattr(index, "dimension", None),
         "model_version": getattr(index, "model_version", None),
     }
+
+
+def _ann_cache_identity(path: Path, expected_source_hash: str) -> tuple[str, str] | None:
+    """Read cache identity only; API intentionally never imports FAISS."""
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if (
+        manifest.get("format") != "kline-ann-manifest-v1"
+        or manifest.get("model") != "colproj"
+        or manifest.get("source_hash") != expected_source_hash
+        or not manifest.get("version_id")
+    ):
+        return None
+    return str(manifest["version_id"]), str(manifest["source_hash"])
 
 
 def _cache_model_status(

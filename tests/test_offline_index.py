@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from datetime import date, timedelta
@@ -40,6 +41,74 @@ def make_rows(count: int = 520, symbol: str = "000002", offset: float = 0.0) -> 
 
 
 class OfflineIndexTests(unittest.TestCase):
+    def test_api_reads_isolated_ann_materialized_colproj_result(self) -> None:
+        rows = make_rows(symbol="000002") + make_rows(symbol="000004", offset=5.0)
+        with TemporaryDirectory() as directory:
+            root = Path(directory)
+            database = root / "market.sqlite3"
+            index_path = root / "colproj.sqlite3"
+            ann_manifest = root / "ann.json"
+            write_snapshot(
+                database,
+                rows,
+                source_hash="fixture-source",
+                manifest={"provider": "fixture"},
+            )
+            config = ProjectConfig(
+                data_path=database,
+                active_symbols=("000002", "000004"),
+                index_path=index_path,
+                ann_index_path=ann_manifest,
+            )
+            build_colproj_index(database, index_path, config=config)
+            ann_manifest.write_text(
+                json.dumps(
+                    {
+                        "format": "kline-ann-manifest-v1",
+                        "model": "colproj",
+                        "version_id": "ann-fixture-v1",
+                        "source_hash": "fixture-source",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            market = MarketData.from_sqlite(database, symbols=config.active_symbols)
+            query_date = market.dates("000002")[-21]
+            query = build_sample_embedding(market, "000002", query_date, config=config)
+            matches, _ = OfflineFeatureIndex(index_path).search(query, market, top_k=3)
+            client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(
+                create_app(config=config)
+            )
+            client.app.state.retrieval_result_cache.put(
+                matches,
+                model="colproj",
+                index_version="ann-fixture-v1",
+                source_hash="fixture-source",
+                symbol="000002",
+                query_date=query_date,
+                parameters={
+                    "month_weight": 1.0,
+                    "week_weight": 1.0,
+                    "day_weight": 1.0,
+                    "top_k": 3,
+                    "embargo_trading_days": 0,
+                    "retrieval_engine": "faiss-ann-exact-rerank-v1",
+                    "ann_candidate_k": config.ann_candidate_k,
+                    "ann_nprobe": config.ann_nprobe,
+                },
+            )
+
+            response = client.post(
+                "/api/retrieval/search",
+                json={"symbol": "000002", "date": query_date.isoformat(), "top_k": 3},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json()["performance"]["search_mode"], "materialized_ann_colproj"
+        )
+        self.assertEqual(response.json()["performance"]["result_cache_hit"], 1)
+
     def test_build_and_search_index_matches_request_scan(self) -> None:
         rows = make_rows(symbol="000002") + make_rows(symbol="000004", offset=5.0)
         with TemporaryDirectory() as directory:

@@ -14,7 +14,13 @@ from typing import Sequence
 import numpy as np
 
 from .offline_index import OfflineFeatureIndex, _unpack_vector
-from .retrieval import RetrievalSample, SampleEmbeddings, SimilarityMatch, weighted_distance
+from .retrieval import (
+    RetrievalSample,
+    SampleEmbeddings,
+    SimilarityMatch,
+    cosine_distance,
+    weighted_distance,
+)
 
 
 SCALES = ("monthly", "weekly", "daily")
@@ -141,9 +147,9 @@ class MultiScaleANNIndex:
                 rank=rank,
                 sample=RetrievalSample(symbol, date.fromisoformat(date_text), embeddings),
                 distance=distance,
-                monthly_distance=weighted_distance(query.embeddings, embeddings, month_weight=1, week_weight=0, day_weight=0)[1],
-                weekly_distance=weighted_distance(query.embeddings, embeddings, month_weight=0, week_weight=1, day_weight=0)[2],
-                daily_distance=weighted_distance(query.embeddings, embeddings, month_weight=0, week_weight=0, day_weight=1)[3],
+                monthly_distance=cosine_distance(query.embeddings.monthly, embeddings.monthly),
+                weekly_distance=cosine_distance(query.embeddings.weekly, embeddings.weekly),
+                daily_distance=cosine_distance(query.embeddings.daily, embeddings.daily),
             )
             for rank, (distance, symbol, date_text, embeddings) in enumerate(candidates[:top_k], 1)
         ]

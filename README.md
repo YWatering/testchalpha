@@ -218,7 +218,7 @@ KLINE_CNN_CHECKPOINT_PATH=data/processed/cnn_stage11/cnn_stage11.pt \
 
 可选参数包括 `--date-from`、`--date-to`、`--top-k`、`--month-weight`、`--week-weight`、`--embargo-trading-days`、`--index`、`--checkpoint` 和 `--cache`。缓存默认写入行情数据库同目录；真实数据库、索引和缓存均为本地文件，不推送至 GitHub。**目前全市场 6,862,102 个样本仍未物化**：现有实现是精确扫描，大型 `--all` 任务会因预计平方级距离计算而被拒绝；完成 ANN 候选召回率评估之前，不能宣称全市场查询已即时返回。
 
-ANN 试点需要安装可选依赖：
+ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的独立进程中生成 ColProj 结果；API 只读取清单元数据和已物化结果，缓存未命中仍回退到现有精确索引，不会在 API 进程加载 FAISS：
 
 ```bash
 .venv/bin/python -m pip install -e '.[ann]'
@@ -227,7 +227,7 @@ ANN 试点需要安装可选依赖：
   --output data/processed/stage14_ann/colproj-0001
 ```
 
-候选召回评估需要同时指定行情数据库；ANN 结果只用于离线候选召回和精确重排，当前不会自动替换网站默认检索路径。由于 macOS 上 FAISS 与 PyTorch 可能加载不同的 OpenMP runtime，当前不在同一个 FastAPI 进程内直接启用 ANN；正式接入需要独立 ANN worker/服务或统一运行时。
+候选召回评估需要同时指定行情数据库。由于 macOS 上 FAISS 与 PyTorch 可能加载不同的 OpenMP runtime，ANN 搜索/预计算须在独立进程运行；API 只读已物化缓存，未命中仍走精确索引。不要将 ANN 视为全量即时检索已经完成。
 
 ```bash
 .venv/bin/python -m kline_retrieval.ann_index evaluate \
@@ -236,6 +236,28 @@ ANN 试点需要安装可选依赖：
   --database data/processed/csmar_a_share_daily.sqlite3 \
   --queries 30 --candidate-k 10000 --nprobe 64
 ```
+
+完成分片 ANN 清单后，可小批量预计算并断点续跑（结果写入指定缓存数据库）：
+
+```bash
+.venv/bin/python -m kline_retrieval.ann_precompute_cli \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --ann-index data/processed/colproj_ann_stage14.json \
+  --cache data/processed/stage14_retrieval_cache.sqlite3 \
+  --symbols 000002 --max-queries 10
+```
+
+API 设置 `KLINE_ANN_INDEX_PATH` 指向相同的 ColProj ANN 清单，并使用同一缓存路径，即可命中 worker 已完成的查询结果。缓存命中不加载 FAISS；缓存未命中走精确索引。示例：
+
+```bash
+KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
+KLINE_INDEX_PATH=data/processed/colproj_stage10.json \
+KLINE_ANN_INDEX_PATH=data/processed/colproj_ann_stage14.json \
+KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
+  .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
+```
+
+不要在尚未完成扩大召回验证和吞吐评估前启动全市场预计算。
 
 详细试点结果见 [阶段十四验证报告](docs/validation-stage-14.md)。
 
