@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from fastapi.testclient import TestClient  # noqa: E402
 
-from kline_retrieval.api import app as configured_app, create_app  # noqa: E402
+from kline_retrieval.api import _ann_cache_identity, app as configured_app, create_app  # noqa: E402
 from kline_retrieval.config import ProjectConfig  # noqa: E402
 from kline_retrieval.sqlite_store import write_snapshot  # noqa: E402
 from kline_retrieval.universe import prepare_universe_batches  # noqa: E402
@@ -214,6 +214,38 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 503)
         self.assertIn("无法加载配置的行情数据", response.json()["detail"])
+
+    def test_ann_cache_identity_supports_cnn_and_rejects_wrong_checkpoint(self) -> None:
+        with TemporaryDirectory() as directory:
+            manifest = Path(directory) / "cnn-ann.json"
+            manifest.write_text(
+                json.dumps(
+                    {
+                        "format": "kline-ann-manifest-v1",
+                        "model": "cnn",
+                        "version_id": "ann-cnn-v1",
+                        "source_hash": "source-v1",
+                        "checkpoint_sha256": "checkpoint-v1",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            valid = _ann_cache_identity(
+                manifest,
+                "source-v1",
+                expected_model="cnn",
+                expected_checkpoint="checkpoint-v1",
+            )
+            invalid = _ann_cache_identity(
+                manifest,
+                "source-v1",
+                expected_model="cnn",
+                expected_checkpoint="checkpoint-v2",
+            )
+
+        self.assertEqual(valid, ("ann-cnn-v1", "source-v1"))
+        self.assertIsNone(invalid)
 
 
 if __name__ == "__main__":

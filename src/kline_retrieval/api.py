@@ -17,6 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .analytics import ReturnAnalysisError, analyze_matches
+from .ann_worker_client import ANN_RETRIEVAL_ENGINE, LEGACY_ANN_RETRIEVAL_ENGINES
 from .charts import build_query_charts
 from .cnn import CNNEmbedder, build_cnn_sample_embedding
 from .config import DEFAULT_CONFIG, ProjectConfig
@@ -317,28 +318,46 @@ def create_app(
                 cached_matches = None
                 cache_mode: str | None = None
                 cache_identity = None
-                if request.model == "colproj" and config.ann_index_path is not None:
+                ann_path = (
+                    config.cnn_ann_index_path
+                    if request.model == "cnn"
+                    else config.ann_index_path
+                )
+                if ann_path is not None:
+                    ann_candidate_k = (
+                        config.cnn_ann_candidate_k
+                        if request.model == "cnn"
+                        else config.ann_candidate_k
+                    )
                     cache_identity = _ann_cache_identity(
-                        config.ann_index_path, selected_index.source_hash
+                        ann_path,
+                        selected_index.source_hash,
+                        expected_model=request.model,
+                        expected_checkpoint=selected_index.checkpoint_sha256,
                     )
                     if cache_identity is not None:
                         ann_version, ann_source_hash = cache_identity
-                        ann_parameters = {
-                            **cache_parameters,
-                            "retrieval_engine": "faiss-ann-exact-rerank-v1",
-                            "ann_candidate_k": config.ann_candidate_k,
-                            "ann_nprobe": config.ann_nprobe,
-                        }
-                        cached_matches = app.state.retrieval_result_cache.get(
-                            model="colproj",
-                            index_version=ann_version,
-                            source_hash=ann_source_hash,
-                            symbol=request.symbol,
-                            query_date=query_date,
-                            parameters=ann_parameters,
-                        )
-                        if cached_matches is not None:
-                            cache_mode = "materialized_ann_colproj"
+                        for engine in (
+                            ANN_RETRIEVAL_ENGINE,
+                            *LEGACY_ANN_RETRIEVAL_ENGINES,
+                        ):
+                            ann_parameters = {
+                                **cache_parameters,
+                                "retrieval_engine": engine,
+                                "ann_candidate_k": ann_candidate_k,
+                                "ann_nprobe": config.ann_nprobe,
+                            }
+                            cached_matches = app.state.retrieval_result_cache.get(
+                                model=request.model,
+                                index_version=ann_version,
+                                source_hash=ann_source_hash,
+                                symbol=request.symbol,
+                                query_date=query_date,
+                                parameters=ann_parameters,
+                            )
+                            if cached_matches is not None:
+                                cache_mode = f"materialized_ann_{request.model}"
+                                break
                 if cached_matches is None:
                     cached_matches = app.state.retrieval_result_cache.get(
                         model=request.model,
@@ -655,7 +674,13 @@ def _model_health(index: OfflineFeatureIndex | CompositeOfflineFeatureIndex | No
     }
 
 
-def _ann_cache_identity(path: Path, expected_source_hash: str) -> tuple[str, str] | None:
+def _ann_cache_identity(
+    path: Path,
+    expected_source_hash: str,
+    *,
+    expected_model: str,
+    expected_checkpoint: str | None = None,
+) -> tuple[str, str] | None:
     """Read cache identity only; API intentionally never imports FAISS."""
     try:
         manifest = json.loads(path.read_text(encoding="utf-8"))
@@ -663,10 +688,13 @@ def _ann_cache_identity(path: Path, expected_source_hash: str) -> tuple[str, str
         return None
     if (
         manifest.get("format") != "kline-ann-manifest-v1"
-        or manifest.get("model") != "colproj"
+        or manifest.get("model") != expected_model
         or manifest.get("source_hash") != expected_source_hash
         or not manifest.get("version_id")
     ):
+        return None
+    manifest_checkpoint = manifest.get("checkpoint_sha256")
+    if expected_model == "cnn" and manifest_checkpoint != expected_checkpoint:
         return None
     return str(manifest["version_id"]), str(manifest["source_hash"])
 

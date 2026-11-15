@@ -113,26 +113,82 @@ class MultiScaleANNIndex:
         candidate_count = 0
         ann_search_ms = 0.0
         candidate_load_ms = 0.0
+        metadata_load_ms = 0.0
         rerank_ms = 0.0
-        for shard in self._shards:
-            shard_search_started = perf_counter()
-            indexes = shard["indexes"]
-            candidate_ids: set[int] = set()
-            if "combined" in indexes and month_weight == 1.0 and week_weight == 1.0:
-                combined_query = np.concatenate(
-                    [np.asarray(vector, dtype=np.float32) for vector in query_vectors]
-                ) / np.sqrt(3.0)
-                _, ids = indexes["combined"].search(
+        prefilter_count = 0
+        combined_candidate_ids: dict[int, set[int]] | None = None
+        use_combined = (
+            month_weight == 1.0
+            and week_weight == 1.0
+            and all("combined" in shard["indexes"] for shard in self._shards)
+        )
+        if use_combined:
+            combined_started = perf_counter()
+            combined_query = np.concatenate(query_arrays) / np.sqrt(3.0)
+            approximate: list[tuple[float, int, int]] = []
+            for shard_index, shard in enumerate(self._shards):
+                scores, ids = shard["indexes"]["combined"].search(
                     combined_query.reshape(1, -1), self.candidate_k
                 )
-                candidate_ids.update(int(item) for item in ids[0] if item >= 0)
+                approximate.extend(
+                    (float(score), shard_index, int(rowid))
+                    for score, rowid in zip(scores[0], ids[0])
+                    if rowid >= 0
+                )
+            approximate.sort(key=lambda item: (-item[0], item[1], item[2]))
+            candidate_metadata: dict[tuple[int, int], tuple[str, str]] = {}
+            ids_by_shard: dict[int, list[int]] = {}
+            for _, shard_index, rowid in approximate:
+                ids_by_shard.setdefault(shard_index, []).append(rowid)
+            for shard_index, rowids in ids_by_shard.items():
+                shard = self._shards[shard_index]
+                connection = shard["connection"]
+                version_id = shard["version_id"]
+                for start in range(0, len(rowids), 900):
+                    batch = rowids[start : start + 900]
+                    load_started = perf_counter()
+                    placeholders = ",".join("?" for _ in batch)
+                    rows = connection.execute(
+                        f"SELECT rowid, symbol, date FROM samples "
+                        f"WHERE version_id=? AND rowid IN ({placeholders})",
+                        (version_id, *batch),
+                    ).fetchall()
+                    metadata_load_ms += (perf_counter() - load_started) * 1000
+                    prefilter_count += len(rows)
+                    candidate_metadata.update(
+                        ((shard_index, int(rowid)), (symbol, date_text))
+                        for rowid, symbol, date_text in rows
+                    )
+            global_budget = min(
+                len(approximate),
+                max(self.candidate_k * 3, top_k * len(self._shards)),
+            )
+            combined_candidate_ids = _select_temporally_eligible_candidates(
+                approximate,
+                candidate_metadata,
+                query_symbol=query.symbol,
+                query_date=query.date,
+                query_positions=query_positions,
+                query_index=query_index,
+                embargo_trading_days=embargo_trading_days,
+                budget=global_budget,
+            )
+            ann_search_ms += (perf_counter() - combined_started) * 1000
+
+        for shard_index, shard in enumerate(self._shards):
+            shard_search_started = perf_counter()
+            indexes = shard["indexes"]
+            if combined_candidate_ids is not None:
+                candidate_ids = combined_candidate_ids.get(shard_index, set())
             else:
+                candidate_ids: set[int] = set()
                 for scale, vector in zip(SCALES, query_vectors):
                     _, ids = indexes[scale].search(
                         np.asarray(vector, dtype=np.float32).reshape(1, -1), self.candidate_k
                     )
                     candidate_ids.update(int(item) for item in ids[0] if item >= 0)
-            ann_search_ms += (perf_counter() - shard_search_started) * 1000
+            if combined_candidate_ids is None:
+                ann_search_ms += (perf_counter() - shard_search_started) * 1000
             if not candidate_ids:
                 continue
             source = shard["source"]
@@ -237,6 +293,8 @@ class MultiScaleANNIndex:
             "ann_ms": round((perf_counter() - started) * 1000, 3),
             "ann_search_ms": round(ann_search_ms, 3),
             "ann_candidate_load_ms": round(candidate_load_ms, 3),
+            "ann_metadata_load_ms": round(metadata_load_ms, 3),
+            "ann_prefilter_count": prefilter_count,
             "ann_rerank_ms": round(rerank_ms, 3),
         }
 
@@ -284,6 +342,38 @@ def _batch_cosine_distances(
     both_zero = (query_norm == 0.0) & (candidate_norms == 0.0)
     distances[both_zero] = 0.0
     return distances
+
+
+def _select_temporally_eligible_candidates(
+    approximate: list[tuple[float, int, int]],
+    metadata: dict[tuple[int, int], tuple[str, str]],
+    *,
+    query_symbol: str,
+    query_date: date,
+    query_positions: dict[date, int],
+    query_index: int,
+    embargo_trading_days: int,
+    budget: int,
+) -> dict[int, set[int]]:
+    selected: dict[int, set[int]] = {}
+    selected_count = 0
+    for _, shard_index, rowid in approximate:
+        candidate = metadata.get((shard_index, rowid))
+        if candidate is None:
+            continue
+        symbol, date_text = candidate
+        candidate_date = date.fromisoformat(date_text)
+        if candidate_date >= query_date:
+            continue
+        if symbol == query_symbol:
+            candidate_index = query_positions.get(candidate_date)
+            if candidate_index is None or query_index - candidate_index <= embargo_trading_days:
+                continue
+        selected.setdefault(shard_index, set()).add(rowid)
+        selected_count += 1
+        if selected_count >= budget:
+            break
+    return selected
 
 
 def build_faiss_shard(

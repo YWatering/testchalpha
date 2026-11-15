@@ -40,7 +40,8 @@ class ProjectConfig:
     retrieval_cache_path: Path | None = None
     ann_index_path: Path | None = None
     cnn_ann_index_path: Path | None = None
-    ann_candidate_k: int = 10_000
+    ann_candidate_k: int = 1_000
+    cnn_ann_candidate_k: int = 200
     ann_nprobe: int = 64
     monthly_period: int = 20
     weekly_period: int = 5
@@ -82,6 +83,7 @@ class ProjectConfig:
         _positive_int(self.chart_height, "chart_height")
         _positive_int(self.default_top_k, "default_top_k")
         _positive_int(self.ann_candidate_k, "ann_candidate_k")
+        _positive_int(self.cnn_ann_candidate_k, "cnn_ann_candidate_k")
         _positive_int(self.ann_nprobe, "ann_nprobe")
 
         if not self.future_horizons or any(horizon <= 0 for horizon in self.future_horizons):
@@ -110,6 +112,9 @@ class ProjectConfig:
             ann_index_path=env.get("KLINE_ANN_INDEX_PATH") or defaults.ann_index_path,
             cnn_ann_index_path=env.get("KLINE_CNN_ANN_INDEX_PATH") or defaults.cnn_ann_index_path,
             ann_candidate_k=int(env.get("KLINE_ANN_CANDIDATE_K", defaults.ann_candidate_k)),
+            cnn_ann_candidate_k=int(
+                env.get("KLINE_CNN_ANN_CANDIDATE_K", defaults.cnn_ann_candidate_k)
+            ),
             ann_nprobe=int(env.get("KLINE_ANN_NPROBE", defaults.ann_nprobe)),
             monthly_period=int(env.get("KLINE_MONTHLY_PERIOD", defaults.monthly_period)),
             weekly_period=int(env.get("KLINE_WEEKLY_PERIOD", defaults.weekly_period)),

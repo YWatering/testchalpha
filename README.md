@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 正在建设结果缓存和预计算；ANN、CNN 双模型试点及全市场缓存覆盖仍未完成。收益率字段语义与异常缩放记录的人工复核仍待完成。每日增量、历史版本回滚属于后续运维增强。
+阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 已完成双模型 ANN 分片、综合索引、隔离预计算 worker 和 API 物化缓存命中，真实 CNN 缓存请求约 0.5 秒；全市场缓存覆盖、扩大召回验收和原子发布仍未完成。收益率字段语义与异常缩放记录的人工复核仍待完成。每日增量、历史版本回滚属于后续运维增强。
 
 阶段 0 交付内容：
 
@@ -216,9 +216,9 @@ KLINE_CNN_CHECKPOINT_PATH=data/processed/cnn_stage11/cnn_stage11.pt \
   --model colproj --symbols 000002 --max-queries 100
 ```
 
-可选参数包括 `--date-from`、`--date-to`、`--top-k`、`--month-weight`、`--week-weight`、`--embargo-trading-days`、`--index`、`--checkpoint` 和 `--cache`。缓存默认写入行情数据库同目录；真实数据库、索引和缓存均为本地文件，不推送至 GitHub。**目前全市场 6,862,102 个样本仍未物化**：现有实现是精确扫描，大型 `--all` 任务会因预计平方级距离计算而被拒绝；完成 ANN 候选召回率评估之前，不能宣称全市场查询已即时返回。
+可选参数包括 `--date-from`、`--date-to`、`--top-k`、`--month-weight`、`--week-weight`、`--embargo-trading-days`、`--index`、`--checkpoint` 和 `--cache`。缓存默认写入行情数据库同目录；真实数据库、索引和缓存均为本地文件，不推送至 GitHub。这个命令使用精确扫描，因此会拒绝大型 `--all` 平方级任务；全市场任务应使用下文的 ANN 隔离命令。**目前全市场 6,862,102 个样本仍未物化**，完成扩大召回率、磁盘和吞吐验收前不能宣称全市场查询已即时返回。
 
-ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的独立进程中生成 ColProj 结果；API 只读取清单元数据和已物化结果，缓存未命中仍回退到现有精确索引，不会在 API 进程加载 FAISS：
+ANN 试点需要安装可选依赖。ColProj 由 FAISS worker 直接处理；CNN 主进程只加载 PyTorch 并把查询向量发送给常驻 FAISS 子进程，避免两个 OpenMP runtime 进入同一进程。API 只读取清单元数据和已物化结果，缓存未命中仍回退到现有精确索引，不会在 API 进程加载 FAISS：
 
 ```bash
 .venv/bin/python -m pip install -e '.[ann]'
@@ -234,6 +234,8 @@ ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的�
   --source data/processed/colproj_stage10/a-share-0001.sqlite3 \
   --ann data/processed/stage14_ann/colproj/a-share-0001
 ```
+
+ColProj 和 CNN 的 28 个分片都需要包含 `combined.faiss`。默认等权查询先跨分片召回，批量读取候选代码/日期并排除未来样本和embargo样本，再筛选有界全局候选并读取原始三尺度向量精确重排；自定义权重仍使用三路候选并按请求权重重排。
 
 候选召回评估需要同时指定行情数据库。由于 macOS 上 FAISS 与 PyTorch 可能加载不同的 OpenMP runtime，ANN 搜索/预计算须在独立进程运行；API 只读已物化缓存，未命中仍走精确索引。不要将 ANN 视为全量即时检索已经完成。
 
@@ -255,6 +257,17 @@ ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的�
   --symbols 000002 --max-queries 10 --candidate-k 1000
 ```
 
+CNN 使用同一个命令，但必须提供检查点；检查点 SHA-256 会与 CNN 源索引校验。当前验证后的候选基数建议为 ColProj 1000、CNN 200：
+
+```bash
+.venv/bin/python -m kline_retrieval.ann_precompute_cli \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --ann-index data/processed/cnn_ann_stage14.json \
+  --checkpoint data/processed/cnn_stage11/cnn_stage11.pt \
+  --cache data/processed/stage14_retrieval_cache.sqlite3 \
+  --symbols 000002 --max-queries 10 --candidate-k 200
+```
+
 确认召回率、磁盘和吞吐预算后，可使用 `--all` 从 ANN 清单自动读取全部股票并断点续跑；不建议在验收前直接启动：
 
 ```bash
@@ -265,12 +278,17 @@ ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的�
   --all --candidate-k 1000
 ```
 
-API 设置 `KLINE_ANN_INDEX_PATH` 指向相同的 ColProj ANN 清单，并使用同一缓存路径，即可命中 worker 已完成的查询结果。缓存命中不加载 FAISS；缓存未命中走精确索引。示例：
+API 设置两种 ANN 清单并使用同一缓存路径，即可命中 worker 已完成的查询结果。缓存命中不加载 FAISS；缓存未命中走精确索引。示例：
 
 ```bash
 KLINE_DATA_PATH=data/processed/csmar_a_share_daily.sqlite3 \
 KLINE_INDEX_PATH=data/processed/colproj_stage10.json \
+KLINE_CNN_INDEX_PATH=data/processed/cnn_stage12.json \
+KLINE_CNN_CHECKPOINT_PATH=data/processed/cnn_stage11/cnn_stage11.pt \
 KLINE_ANN_INDEX_PATH=data/processed/colproj_ann_stage14.json \
+KLINE_CNN_ANN_INDEX_PATH=data/processed/cnn_ann_stage14.json \
+KLINE_ANN_CANDIDATE_K=1000 \
+KLINE_CNN_ANN_CANDIDATE_K=200 \
 KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
   .venv/bin/uvicorn kline_retrieval.api:app --host 127.0.0.1 --port 8001
 ```

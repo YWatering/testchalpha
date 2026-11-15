@@ -26,6 +26,7 @@ kline-build-cnn-shard = "kline_retrieval.cnn_index:main"
 kline-precompute-retrieval = "kline_retrieval.precompute_cli:main"
 kline-ann-index = "kline_retrieval.ann_index:main"
 kline-precompute-ann = "kline_retrieval.ann_precompute_cli:main"
+kline-ann-search-worker = "kline_retrieval.ann_search_worker:main"
 
 [project.optional-dependencies]
 web = [

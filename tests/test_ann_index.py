@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -7,7 +8,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from kline_retrieval.ann_index import _batch_cosine_distances  # noqa: E402
+from kline_retrieval.ann_index import (  # noqa: E402
+    _batch_cosine_distances,
+    _select_temporally_eligible_candidates,
+)
 
 
 class ANNIndexTests(unittest.TestCase):
@@ -21,6 +25,37 @@ class ANNIndexTests(unittest.TestCase):
         distances = _batch_cosine_distances(query, float(np.linalg.norm(query)), candidates)
 
         np.testing.assert_allclose(distances, (0.0, 1.0, 1.0), rtol=0.0, atol=1e-6)
+
+    def test_temporal_prefilter_runs_before_global_candidate_budget(self) -> None:
+        query_date = date(2024, 1, 5)
+        positions = {
+            date(2024, 1, 2): 0,
+            date(2024, 1, 3): 1,
+            date(2024, 1, 4): 2,
+            query_date: 3,
+        }
+        selected = _select_temporally_eligible_candidates(
+            [
+                (0.99, 0, 1),
+                (0.98, 0, 2),
+                (0.97, 1, 3),
+                (0.96, 1, 4),
+            ],
+            {
+                (0, 1): ("OTHER", "2024-01-08"),
+                (0, 2): ("QUERY", "2024-01-04"),
+                (1, 3): ("OTHER", "2024-01-03"),
+                (1, 4): ("OTHER", "2024-01-02"),
+            },
+            query_symbol="QUERY",
+            query_date=query_date,
+            query_positions=positions,
+            query_index=3,
+            embargo_trading_days=1,
+            budget=2,
+        )
+
+        self.assertEqual(selected, {1: {3, 4}})
 
 
 if __name__ == "__main__":
