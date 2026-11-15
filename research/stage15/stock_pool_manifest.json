@@ -1,0 +1,127 @@
+{
+  "build_date": "2023-12-29",
+  "database": "data/processed/csmar_a_share_daily.sqlite3",
+  "database_end_date": "2026-10-23",
+  "dataset_scope_claim": "user_supplied_dataset_claims_st_and_finance_excluded",
+  "eligibility_rules": {
+    "amount_must_be_positive_for_liquid_session": true,
+    "last_observation_must_equal_build_date": true,
+    "min_history_calendar_days": 730,
+    "min_history_sessions": 400,
+    "min_liquid_sessions": 55,
+    "min_recent_sessions": 55
+  },
+  "eligible_symbol_count": 4223,
+  "index_coverage": {
+    "cnn": {
+      "covered_symbol_count": 50,
+      "manifest": "data/processed/cnn_stage12.json",
+      "maximum_sample_count": 1716,
+      "minimum_sample_count": 1094,
+      "missing_symbols": []
+    },
+    "colproj": {
+      "covered_symbol_count": 50,
+      "manifest": "data/processed/colproj_stage10.json",
+      "maximum_sample_count": 1716,
+      "minimum_sample_count": 1094,
+      "missing_symbols": []
+    }
+  },
+  "limitations": [
+    "CSMAR daily table has no point-in-time industry field, so the first pool uses exchange-board stratification instead of industry caps.",
+    "The non-ST and non-finance scope is inherited from the supplied dataset claim and cannot be independently verified from the daily table.",
+    "Instrument names are current display metadata and are not used by the historical selection rule.",
+    "This is a research sample pool, not a list of investment recommendations."
+  ],
+  "lookback_end_date": "2023-12-29",
+  "lookback_sessions": 60,
+  "lookback_start_date": "2023-10-09",
+  "name_metadata": {
+    "source": "https://www.cninfo.com.cn/new/data/szse_stock.json",
+    "updated_at_utc": "2026-10-25T15:19:05.646152+00:00",
+    "used_for_selection": false
+  },
+  "pool_size": 50,
+  "price_basis": "return_reconstructed_v1",
+  "ranking_rule": "descending_60_session_average_trading_amount_within_stratum",
+  "schema_version": "stage15-stock-pool-v1",
+  "selected_symbols": [
+    "601127",
+    "000625",
+    "600519",
+    "300750",
+    "002456",
+    "300308",
+    "000977",
+    "300364",
+    "600418",
+    "300418",
+    "300502",
+    "300339",
+    "002230",
+    "601012",
+    "600839",
+    "600895",
+    "002594",
+    "300045",
+    "000063",
+    "000858",
+    "603220",
+    "300735",
+    "002466",
+    "002176",
+    "600733",
+    "603496",
+    "688256",
+    "002261",
+    "002475",
+    "000766",
+    "300255",
+    "300394",
+    "603019",
+    "300199",
+    "601138",
+    "603259",
+    "000158",
+    "002241",
+    "688981",
+    "300274",
+    "603178",
+    "603000",
+    "002654",
+    "000568",
+    "601888",
+    "603985",
+    "603108",
+    "688012",
+    "688111",
+    "920021"
+  ],
+  "selection_data_end_date": "2023-12-29",
+  "selection_sha256": "bfb5e9dd84b8b00715948b7f5ee91c37bcf694354d407149a9990fea26146173",
+  "source_hash": "173b465f311686a7cfba51e6057364c9ead10b2ca08dd9be8476476bc938d291",
+  "stratification_rule": "proportional allocation by exchange and board using largest remainder",
+  "stratum_eligible_counts": {
+    "BSE_BSE": 77,
+    "SSE_MAIN": 1456,
+    "SSE_STAR": 363,
+    "SZSE_CHINEXT": 1024,
+    "SZSE_MAIN": 1303
+  },
+  "stratum_quotas": {
+    "BSE_BSE": 1,
+    "SSE_MAIN": 17,
+    "SSE_STAR": 4,
+    "SZSE_CHINEXT": 12,
+    "SZSE_MAIN": 16
+  },
+  "test_period": {
+    "end": "2026-10-23",
+    "start": "2025-01-01"
+  },
+  "validation_period": {
+    "end": "2024-12-31",
+    "start": "2024-01-01"
+  }
+}
