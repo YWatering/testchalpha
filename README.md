@@ -227,6 +227,14 @@ ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的�
   --output data/processed/stage14_ann/colproj-0001
 ```
 
+已有三尺度 ANN 分片可增量补建默认权重的综合索引，不需要重建原有三个索引：
+
+```bash
+.venv/bin/python -m kline_retrieval.ann_index build-combined \
+  --source data/processed/colproj_stage10/a-share-0001.sqlite3 \
+  --ann data/processed/stage14_ann/colproj/a-share-0001
+```
+
 候选召回评估需要同时指定行情数据库。由于 macOS 上 FAISS 与 PyTorch 可能加载不同的 OpenMP runtime，ANN 搜索/预计算须在独立进程运行；API 只读已物化缓存，未命中仍走精确索引。不要将 ANN 视为全量即时检索已经完成。
 
 ```bash
@@ -244,7 +252,17 @@ ANN 试点需要安装可选依赖。离线 worker 可在不启动 PyTorch 的�
   --database data/processed/csmar_a_share_daily.sqlite3 \
   --ann-index data/processed/colproj_ann_stage14.json \
   --cache data/processed/stage14_retrieval_cache.sqlite3 \
-  --symbols 000002 --max-queries 10
+  --symbols 000002 --max-queries 10 --candidate-k 1000
+```
+
+确认召回率、磁盘和吞吐预算后，可使用 `--all` 从 ANN 清单自动读取全部股票并断点续跑；不建议在验收前直接启动：
+
+```bash
+.venv/bin/python -m kline_retrieval.ann_precompute_cli \
+  --database data/processed/csmar_a_share_daily.sqlite3 \
+  --ann-index data/processed/colproj_ann_stage14.json \
+  --cache data/processed/stage14_retrieval_cache.sqlite3 \
+  --all --candidate-k 1000
 ```
 
 API 设置 `KLINE_ANN_INDEX_PATH` 指向相同的 ColProj ANN 清单，并使用同一缓存路径，即可命中 worker 已完成的查询结果。缓存命中不加载 FAISS；缓存未命中走精确索引。示例：

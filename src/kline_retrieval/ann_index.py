@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import sqlite3
+from urllib.parse import quote
 from datetime import date
 from pathlib import Path
 from time import perf_counter
@@ -59,19 +60,28 @@ class MultiScaleANNIndex:
             if shard_manifest.get("source_hash") != self.source_hash:
                 raise ValueError("ANN 分片行情快照不一致")
             indexes = {scale: faiss.read_index(str(ann_dir / f"{scale}.faiss")) for scale in SCALES}
+            combined_path = ann_dir / "combined.faiss"
+            if combined_path.is_file():
+                indexes["combined"] = faiss.read_index(str(combined_path))
             for index in indexes.values():
                 index.nprobe = min(self.nprobe, index.nlist)
-            with sqlite3.connect(source) as connection:
-                feature = connection.execute(
-                    "SELECT symbols_json, sample_count FROM feature_versions WHERE version_id=?",
-                    (shard_manifest["version_id"],),
-                ).fetchone()
+            connection = _open_ann_source(source)
+            feature = connection.execute(
+                "SELECT symbols_json, sample_count FROM feature_versions WHERE version_id=?",
+                (shard_manifest["version_id"],),
+            ).fetchone()
             if feature is None:
+                connection.close()
                 raise ValueError(f"ANN 源分片没有对应 ready 版本: {source}")
             symbols.update(json.loads(feature[0]))
             sample_count += int(feature[1])
             self._shards.append(
-                {"source": source, "version_id": shard_manifest["version_id"], "indexes": indexes}
+                {
+                    "source": source,
+                    "version_id": shard_manifest["version_id"],
+                    "indexes": indexes,
+                    "connection": connection,
+                }
             )
         self.symbols = tuple(sorted(symbols))
         self.sample_count = sample_count
@@ -92,77 +102,188 @@ class MultiScaleANNIndex:
     ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
         started = perf_counter()
         query_vectors = (query.embeddings.monthly, query.embeddings.weekly, query.embeddings.daily)
+        query_arrays = tuple(np.asarray(vector, dtype=np.float32) for vector in query_vectors)
+        query_norms = tuple(float(np.linalg.norm(vector)) for vector in query_arrays)
         query_dates = market_data.dates(query.symbol)
         query_positions = {trading_date: index for index, trading_date in enumerate(query_dates)}
         query_index = query_positions.get(query.date)
         if query_index is None:
             raise ValueError(f"查询日期不在行情数据中: {query.symbol} {query.date}")
-        candidates: list[tuple[float, str, str, SampleEmbeddings]] = []
+        candidates: list[tuple[float, str, str, float, float, float, SampleEmbeddings]] = []
         candidate_count = 0
+        ann_search_ms = 0.0
+        candidate_load_ms = 0.0
+        rerank_ms = 0.0
         for shard in self._shards:
+            shard_search_started = perf_counter()
             indexes = shard["indexes"]
             candidate_ids: set[int] = set()
-            for scale, vector in zip(SCALES, query_vectors):
-                _, ids = indexes[scale].search(
-                    np.asarray(vector, dtype=np.float32).reshape(1, -1), self.candidate_k
+            if "combined" in indexes and month_weight == 1.0 and week_weight == 1.0:
+                combined_query = np.concatenate(
+                    [np.asarray(vector, dtype=np.float32) for vector in query_vectors]
+                ) / np.sqrt(3.0)
+                _, ids = indexes["combined"].search(
+                    combined_query.reshape(1, -1), self.candidate_k
                 )
                 candidate_ids.update(int(item) for item in ids[0] if item >= 0)
+            else:
+                for scale, vector in zip(SCALES, query_vectors):
+                    _, ids = indexes[scale].search(
+                        np.asarray(vector, dtype=np.float32).reshape(1, -1), self.candidate_k
+                    )
+                    candidate_ids.update(int(item) for item in ids[0] if item >= 0)
+            ann_search_ms += (perf_counter() - shard_search_started) * 1000
             if not candidate_ids:
                 continue
             source = shard["source"]
             version_id = shard["version_id"]
             ordered_ids = sorted(candidate_ids)
-            with sqlite3.connect(source) as connection:
-                for start in range(0, len(ordered_ids), 500):
-                    batch = ordered_ids[start : start + 500]
-                    placeholders = ",".join("?" for _ in batch)
-                    rows = connection.execute(
-                        f"SELECT rowid, symbol, date, monthly, weekly, daily FROM samples "
-                        f"WHERE version_id=? AND rowid IN ({placeholders})",
-                        (version_id, *batch),
-                    ).fetchall()
-                    candidate_count += len(rows)
-                    for _, symbol, date_text, monthly, weekly, daily in rows:
-                        candidate_date = date.fromisoformat(date_text)
-                        if candidate_date >= query.date:
+            shard_candidates: list[tuple[float, str, str, float, float, float, SampleEmbeddings]] = []
+            connection = shard["connection"]
+            for start in range(0, len(ordered_ids), 900):
+                batch = ordered_ids[start : start + 900]
+                load_started = perf_counter()
+                placeholders = ",".join("?" for _ in batch)
+                rows = connection.execute(
+                    f"SELECT rowid, symbol, date, monthly, weekly, daily FROM samples "
+                    f"WHERE version_id=? AND rowid IN ({placeholders})",
+                    (version_id, *batch),
+                ).fetchall()
+                candidate_load_ms += (perf_counter() - load_started) * 1000
+                candidate_count += len(rows)
+                eligible: list[tuple[str, str, bytes, bytes, bytes]] = []
+                for _, symbol, date_text, monthly, weekly, daily in rows:
+                    candidate_date = date.fromisoformat(date_text)
+                    if candidate_date >= query.date:
+                        continue
+                    if symbol == query.symbol:
+                        candidate_index = query_positions.get(candidate_date)
+                        if candidate_index is None or query_index - candidate_index <= embargo_trading_days:
                             continue
-                        if symbol == query.symbol:
-                            candidate_index = query_positions.get(candidate_date)
-                            if candidate_index is None or query_index - candidate_index <= embargo_trading_days:
-                                continue
-                        embeddings = SampleEmbeddings(
-                            _unpack_vector(monthly), _unpack_vector(weekly), _unpack_vector(daily)
+                    eligible.append((symbol, date_text, monthly, weekly, daily))
+                if not eligible:
+                    continue
+
+                rerank_started = perf_counter()
+                monthly_matrix = _decode_vector_batch(
+                    [item[2] for item in eligible], len(query_arrays[0])
+                )
+                weekly_matrix = _decode_vector_batch(
+                    [item[3] for item in eligible], len(query_arrays[1])
+                )
+                daily_matrix = _decode_vector_batch(
+                    [item[4] for item in eligible], len(query_arrays[2])
+                )
+                monthly_distances = _batch_cosine_distances(
+                    query_arrays[0], query_norms[0], monthly_matrix
+                )
+                weekly_distances = _batch_cosine_distances(
+                    query_arrays[1], query_norms[1], weekly_matrix
+                )
+                daily_distances = _batch_cosine_distances(
+                    query_arrays[2], query_norms[2], daily_matrix
+                )
+                denominator = month_weight + week_weight + day_weight
+                total_distances = (
+                    month_weight * monthly_distances
+                    + week_weight * weekly_distances
+                    + day_weight * daily_distances
+                ) / denominator
+                batch_order = np.argsort(total_distances, kind="stable")[:top_k]
+                for row_index in batch_order.tolist():
+                    symbol, date_text, *_ = eligible[row_index]
+                    shard_candidates.append(
+                        (
+                            float(total_distances[row_index]),
+                            symbol,
+                            date_text,
+                            float(monthly_distances[row_index]),
+                            float(weekly_distances[row_index]),
+                            float(daily_distances[row_index]),
+                            SampleEmbeddings(
+                                tuple(float(value) for value in monthly_matrix[row_index]),
+                                tuple(float(value) for value in weekly_matrix[row_index]),
+                                tuple(float(value) for value in daily_matrix[row_index]),
+                            ),
                         )
-                        distances = weighted_distance(
-                            query.embeddings,
-                            embeddings,
-                            month_weight=month_weight,
-                            week_weight=week_weight,
-                            day_weight=day_weight,
-                        )
-                        candidates.append((distances[0], symbol, date_text, embeddings))
+                    )
+                rerank_ms += (perf_counter() - rerank_started) * 1000
+
+            shard_candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+            candidates.extend(shard_candidates[:top_k])
         candidates.sort(key=lambda item: (item[0], item[1], item[2]))
         matches = [
             SimilarityMatch(
                 rank=rank,
                 sample=RetrievalSample(symbol, date.fromisoformat(date_text), embeddings),
                 distance=distance,
-                monthly_distance=cosine_distance(query.embeddings.monthly, embeddings.monthly),
-                weekly_distance=cosine_distance(query.embeddings.weekly, embeddings.weekly),
-                daily_distance=cosine_distance(query.embeddings.daily, embeddings.daily),
+                monthly_distance=monthly_distance,
+                weekly_distance=weekly_distance,
+                daily_distance=daily_distance,
             )
-            for rank, (distance, symbol, date_text, embeddings) in enumerate(candidates[:top_k], 1)
+            for rank, (
+                distance,
+                symbol,
+                date_text,
+                monthly_distance,
+                weekly_distance,
+                daily_distance,
+                embeddings,
+            ) in enumerate(candidates[:top_k], 1)
         ]
         return matches, {
             "ann_candidate_count": candidate_count,
             "ann_shard_count": len(self._shards),
             "ann_ms": round((perf_counter() - started) * 1000, 3),
+            "ann_search_ms": round(ann_search_ms, 3),
+            "ann_candidate_load_ms": round(candidate_load_ms, 3),
+            "ann_rerank_ms": round(rerank_ms, 3),
         }
 
 
 def _resolve_manifest_path(manifest_path: Path, value: str) -> Path:
     path = Path(value)
     return path if path.is_absolute() else (manifest_path.parent / path).resolve()
+
+
+def _open_ann_source(source: Path) -> sqlite3.Connection:
+    """Open immutable feature storage with a bounded per-shard read cache."""
+    uri = f"file:{quote(str(source.resolve()))}?mode=ro&immutable=1"
+    connection = sqlite3.connect(uri, uri=True)
+    connection.execute("PRAGMA query_only=ON")
+    connection.execute("PRAGMA temp_store=MEMORY")
+    connection.execute("PRAGMA cache_size=-16384")
+    connection.execute("PRAGMA mmap_size=268435456")
+    return connection
+
+
+def _decode_vector_batch(values: list[bytes], dimension: int) -> np.ndarray:
+    """Decode one SQLite blob column without constructing per-row tuples."""
+    if not values:
+        return np.empty((0, dimension), dtype=np.float32)
+    expected_bytes = dimension * 4
+    if any(len(value) != expected_bytes for value in values):
+        raise ValueError("ANN 候选向量维度不一致")
+    return np.frombuffer(b"".join(values), dtype="<f4").reshape(len(values), dimension)
+
+
+def _batch_cosine_distances(
+    query: np.ndarray,
+    query_norm: float,
+    candidates: np.ndarray,
+) -> np.ndarray:
+    if not len(candidates):
+        return np.empty((0,), dtype=np.float32)
+    candidate_norms = np.linalg.norm(candidates, axis=1)
+    similarities = np.zeros(len(candidates), dtype=np.float32)
+    valid = (query_norm > 0.0) & (candidate_norms > 0.0)
+    if np.any(valid):
+        similarities[valid] = (candidates[valid] @ query) / (candidate_norms[valid] * query_norm)
+    np.clip(similarities, -1.0, 1.0, out=similarities)
+    distances = 1.0 - similarities
+    both_zero = (query_norm == 0.0) & (candidate_norms == 0.0)
+    distances[both_zero] = 0.0
+    return distances
 
 
 def build_faiss_shard(
@@ -173,7 +294,7 @@ def build_faiss_shard(
     nlist: int | None = None,
     batch_size: int = 16_384,
 ) -> dict[str, object]:
-    """Build three compressed cosine IVF-PQ indexes keyed by SQLite sample rowid."""
+    """Build three scale indexes plus a default-weight combined IVF-PQ index."""
 
     try:
         import faiss
@@ -265,7 +386,162 @@ def build_faiss_shard(
                 added += len(batch_ids)
             faiss.write_index(index, str(destination / f"{scale}.faiss"))
             result["indexes"][scale] = {"vectors": added, "training_vectors": len(train_values)}
+
+        result["indexes"]["combined"] = _build_combined_faiss_index(
+            connection,
+            version_id=version_id,
+            destination=destination,
+            dimension=int(dimension),
+            row_count=int(row_count),
+            selected_nlist=selected_nlist,
+            pq_bits=int(configuration["pq_bits"]),
+            training_rows=training_rows,
+            batch_size=batch_size,
+        )
+        configuration["combined_dimension"] = int(dimension) * len(SCALES)
+        configuration["combined_weights"] = [1.0, 1.0, 1.0]
+        (destination / "manifest.json").write_text(
+            json.dumps(configuration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        )
     return result
+
+
+def build_combined_faiss_shard(
+    source_path: str | Path,
+    ann_dir: str | Path,
+    *,
+    training_rows: int = 100_000,
+    batch_size: int = 16_384,
+) -> dict[str, object]:
+    """Add the default-weight combined index without rebuilding scale indexes."""
+
+    try:
+        import faiss
+    except ImportError as exc:
+        raise RuntimeError("安装 ANN 依赖: pip install -e '.[ann]'") from exc
+    del faiss  # Import here validates the optional dependency before opening files.
+    source = Path(source_path)
+    destination = Path(ann_dir)
+    manifest_path = destination / "manifest.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"ANN 分片清单不存在: {manifest_path}")
+    configuration = json.loads(manifest_path.read_text(encoding="utf-8"))
+    if configuration.get("format") != "kline-faiss-multiscale-ivfpq-v1":
+        raise ValueError("ANN 分片清单格式不受支持")
+    if Path(configuration["source_path"]).resolve() != source.resolve():
+        raise ValueError("ANN 分片清单与源索引路径不匹配")
+    with sqlite3.connect(source) as connection:
+        version = connection.execute(
+            "SELECT version_id, source_hash, model, dimension, sample_count FROM feature_versions "
+            "WHERE status='ready' ORDER BY updated_at_utc DESC LIMIT 1"
+        ).fetchone()
+        if version is None:
+            raise ValueError(f"索引分片没有 ready 版本: {source}")
+        version_id, source_hash, model, dimension, row_count = version
+        if version_id != configuration["version_id"] or source_hash != configuration["source_hash"]:
+            raise ValueError("ANN 分片源版本已变化，请重新构建完整 ANN 分片")
+        selected_nlist = int(configuration["nlist"])
+        result = _build_combined_faiss_index(
+            connection,
+            version_id=version_id,
+            destination=destination,
+            dimension=int(dimension),
+            row_count=int(row_count),
+            selected_nlist=selected_nlist,
+            pq_bits=int(configuration.get("pq_bits", 8)),
+            training_rows=training_rows,
+            batch_size=batch_size,
+        )
+    configuration["combined_dimension"] = int(dimension) * len(SCALES)
+    configuration["combined_weights"] = [1.0, 1.0, 1.0]
+    manifest_path.write_text(
+        json.dumps(configuration, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    return {
+        "source_path": str(source),
+        "version_id": version_id,
+        "model": model,
+        "combined": result,
+    }
+
+
+def _build_combined_faiss_index(
+    connection: sqlite3.Connection,
+    *,
+    version_id: str,
+    destination: Path,
+    dimension: int,
+    row_count: int,
+    selected_nlist: int,
+    pq_bits: int,
+    training_rows: int,
+    batch_size: int,
+) -> dict[str, object]:
+    import faiss
+
+    combined_dimension = dimension * len(SCALES)
+    combined_m = 16 if combined_dimension % 16 == 0 else 8
+    combined_train_count = min(row_count, max(training_rows, selected_nlist * 39))
+    combined_train_values = np.empty((combined_train_count, combined_dimension), dtype=np.float32)
+    combined_seen = 0
+    combined_stride = max(1, row_count // combined_train_count)
+    cursor = connection.execute(
+        "SELECT rowid, monthly, weekly, daily FROM samples WHERE version_id=? ORDER BY rowid",
+        (version_id,),
+    )
+    for row_index, (_, monthly, weekly, daily) in enumerate(cursor):
+        if row_index % combined_stride == 0 and combined_seen < combined_train_count:
+            combined_train_values[combined_seen] = _concat_scales(monthly, weekly, daily) / np.sqrt(3.0)
+            combined_seen += 1
+    combined_train_values = combined_train_values[:combined_seen]
+    if not len(combined_train_values):
+        raise ValueError("综合 ANN 没有训练向量")
+    combined_index = faiss.IndexIVFPQ(
+        faiss.IndexFlatIP(combined_dimension),
+        combined_dimension,
+        selected_nlist,
+        combined_m,
+        pq_bits,
+        faiss.METRIC_INNER_PRODUCT,
+    )
+    combined_index.train(combined_train_values)
+    cursor = connection.execute(
+        "SELECT rowid, monthly, weekly, daily FROM samples WHERE version_id=? ORDER BY rowid",
+        (version_id,),
+    )
+    batch_ids: list[int] = []
+    batch_vectors: list[np.ndarray] = []
+    added = 0
+    for rowid, monthly, weekly, daily in cursor:
+        batch_ids.append(int(rowid))
+        batch_vectors.append(_concat_scales(monthly, weekly, daily) / np.sqrt(3.0))
+        if len(batch_ids) >= batch_size:
+            combined_index.add_with_ids(
+                np.asarray(batch_vectors, dtype=np.float32),
+                np.asarray(batch_ids, dtype=np.int64),
+            )
+            added += len(batch_ids)
+            batch_ids.clear()
+            batch_vectors.clear()
+    if batch_ids:
+        combined_index.add_with_ids(
+            np.asarray(batch_vectors, dtype=np.float32),
+            np.asarray(batch_ids, dtype=np.int64),
+        )
+        added += len(batch_ids)
+    destination.mkdir(parents=True, exist_ok=True)
+    faiss.write_index(combined_index, str(destination / "combined.faiss"))
+    return {"vectors": added, "training_vectors": len(combined_train_values), "weights": [1.0, 1.0, 1.0]}
+
+
+def _concat_scales(monthly: bytes, weekly: bytes, daily: bytes) -> np.ndarray:
+    return np.concatenate(
+        [
+            np.frombuffer(monthly, dtype="<f4"),
+            np.frombuffer(weekly, dtype="<f4"),
+            np.frombuffer(daily, dtype="<f4"),
+        ]
+    )
 
 
 def evaluate_faiss_recall(
@@ -426,6 +702,10 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--training-rows", type=int, default=100_000)
     build.add_argument("--nlist", type=int)
+    combined = subparsers.add_parser("build-combined")
+    combined.add_argument("--source", type=Path, required=True)
+    combined.add_argument("--ann", type=Path, required=True)
+    combined.add_argument("--training-rows", type=int, default=100_000)
     evaluate = subparsers.add_parser("evaluate")
     evaluate.add_argument("--source", type=Path, required=True)
     evaluate.add_argument("--ann", type=Path, required=True)
@@ -444,6 +724,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "build":
         print(json.dumps(build_faiss_shard(args.source, args.output, training_rows=args.training_rows, nlist=args.nlist), indent=2))
+    elif args.command == "build-combined":
+        print(json.dumps(
+            build_combined_faiss_shard(
+                args.source,
+                args.ann,
+                training_rows=args.training_rows,
+            ),
+            indent=2,
+        ))
     else:
         print(json.dumps(evaluate_faiss_recall(
             args.source, args.ann, args.database, queries=args.queries, candidate_k=args.candidate_k,

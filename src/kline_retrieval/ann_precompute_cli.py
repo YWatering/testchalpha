@@ -20,10 +20,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--database", type=Path, required=True)
     parser.add_argument("--ann-index", type=Path, required=True)
     parser.add_argument("--cache", type=Path, required=True)
-    parser.add_argument("--symbols", required=True, help="逗号分隔的股票代码")
+    parser.add_argument("--symbols", help="逗号分隔的股票代码")
+    parser.add_argument("--all", action="store_true", help="处理当前 ANN 清单覆盖的全部股票")
     parser.add_argument("--date-from", type=date.fromisoformat)
     parser.add_argument("--date-to", type=date.fromisoformat)
     parser.add_argument("--max-queries", type=int, default=100)
+    parser.add_argument("--candidate-k", type=int, help="每个 ANN 分片的候选数；默认读取 KLINE_ANN_CANDIDATE_K")
     parser.add_argument("--top-k", type=int, default=20)
     parser.add_argument("--month-weight", type=float, default=1.0)
     parser.add_argument("--week-weight", type=float, default=1.0)
@@ -37,14 +39,23 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.max_queries <= 0 or args.top_k <= 0 or args.embargo_trading_days < 0:
             raise ValueError("max-queries/top-k 必须大于 0，embargo 不能小于 0")
         config = ProjectConfig.from_env()
+        candidate_k = args.candidate_k or config.ann_candidate_k
+        if candidate_k <= 0:
+            raise ValueError("candidate-k 必须大于 0")
         ann = MultiScaleANNIndex(
             args.ann_index,
-            candidate_k=config.ann_candidate_k,
+            candidate_k=candidate_k,
             nprobe=config.ann_nprobe,
         )
         if ann.model != "colproj":
             raise ValueError("当前隔离 ANN worker 仅支持 ColProj，CNN 需单独运行时隔离")
-        symbols = tuple(dict.fromkeys(item.strip() for item in args.symbols.split(",") if item.strip()))
+        if not args.all and not args.symbols:
+            raise ValueError("请指定 --symbols，或显式使用 --all")
+        symbols = (
+            ann.symbols
+            if args.all
+            else tuple(dict.fromkeys(item.strip() for item in args.symbols.split(",") if item.strip()))
+        )
         if not symbols or any(symbol not in ann.symbols for symbol in symbols):
             raise ValueError("指定股票为空或不在 ANN 索引覆盖范围内")
         cache = RetrievalResultCache(args.cache)
@@ -55,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "top_k": args.top_k,
             "embargo_trading_days": args.embargo_trading_days,
             "retrieval_engine": "faiss-ann-exact-rerank-v1",
-            "ann_candidate_k": config.ann_candidate_k,
+            "ann_candidate_k": candidate_k,
             "ann_nprobe": config.ann_nprobe,
         }
         selected: list[tuple[str, date]] = []
@@ -76,7 +87,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 if (args.date_from is None or trading_date >= args.date_from)
                 and (args.date_to is None or trading_date <= args.date_to)
             )
-        selected = selected[: args.max_queries]
+        if not args.all:
+            selected = selected[: args.max_queries]
         job_key = cache.begin_job(
             model="colproj",
             index_version=ann.version_id,
