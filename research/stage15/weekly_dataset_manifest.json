@@ -1,0 +1,31 @@
+{
+  "database": "data/processed/csmar_a_share_daily.sqlite3",
+  "end_date": "2026-10-23",
+  "entry_rule": "next_market_session_raw_open",
+  "execution_price_basis": "raw_open_and_raw_close",
+  "exit_rule": "market_session_t_plus_5_raw_close",
+  "feature_price_basis": "return_reconstructed_v1",
+  "gross_return_formula": "exit_raw_close / entry_raw_open - 1",
+  "horizon_sessions": 5,
+  "label_count": 7250,
+  "limitations": [
+    "Limit-up and limit-down execution checks are not available in the current daily table.",
+    "Corporate-action total-return semantics still require manual source-field verification.",
+    "This dataset contains gross price returns before commissions, stamp duty and slippage."
+  ],
+  "reconstructed_source_hash": "4cdf937ddeb4c34fefd5c1ad558a9cd3ded8086bc72d4f1c5a135b59a2128f35",
+  "schema_version": "stage15-weekly-dataset-v1",
+  "signal_rule": "last_market_session_of_iso_week",
+  "source_hash": "173b465f311686a7cfba51e6057364c9ead10b2ca08dd9be8476476bc938d291",
+  "start_date": "2024-01-01",
+  "status_counts": {
+    "incomplete_market_horizon": 50,
+    "missing_entry_bar": 2,
+    "missing_exit_bar": 4,
+    "missing_signal_bar": 11,
+    "tradable": 7183
+  },
+  "stock_count": 50,
+  "tradable_label_count": 7183,
+  "weekly_signal_count": 145
+}

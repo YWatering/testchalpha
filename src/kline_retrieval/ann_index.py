@@ -86,6 +86,15 @@ class MultiScaleANNIndex:
         self.symbols = tuple(sorted(symbols))
         self.sample_count = sample_count
 
+    def close(self) -> None:
+        """Close read-only SQLite connections held by all ANN shards."""
+
+        for shard in self._shards:
+            connection = shard.get("connection")
+            if connection is not None:
+                connection.close()
+                shard["connection"] = None
+
     def is_compatible(self, source_hash: str | None, config: object, *, price_basis: str | None = None) -> bool:
         return self.source_hash == (source_hash or "")
 
@@ -99,6 +108,7 @@ class MultiScaleANNIndex:
         day_weight: float = 1.0,
         top_k: int = 20,
         embargo_trading_days: int = 0,
+        eligible_candidate_dates: set[date] | None = None,
     ) -> tuple[list[SimilarityMatch], dict[str, int | float]]:
         started = perf_counter()
         query_vectors = (query.embeddings.monthly, query.embeddings.weekly, query.embeddings.daily)
@@ -159,9 +169,10 @@ class MultiScaleANNIndex:
                         ((shard_index, int(rowid)), (symbol, date_text))
                         for rowid, symbol, date_text in rows
                     )
+            global_budget_multiplier = 6 if eligible_candidate_dates is not None else len(self._shards)
             global_budget = min(
                 len(approximate),
-                max(self.candidate_k * 3, top_k * len(self._shards)),
+                max(self.candidate_k * 3, top_k * global_budget_multiplier),
             )
             combined_candidate_ids = _select_temporally_eligible_candidates(
                 approximate,
@@ -171,6 +182,7 @@ class MultiScaleANNIndex:
                 query_positions=query_positions,
                 query_index=query_index,
                 embargo_trading_days=embargo_trading_days,
+                eligible_candidate_dates=eligible_candidate_dates,
                 budget=global_budget,
             )
             ann_search_ms += (perf_counter() - combined_started) * 1000
@@ -211,6 +223,11 @@ class MultiScaleANNIndex:
                 for _, symbol, date_text, monthly, weekly, daily in rows:
                     candidate_date = date.fromisoformat(date_text)
                     if candidate_date >= query.date:
+                        continue
+                    if (
+                        eligible_candidate_dates is not None
+                        and candidate_date not in eligible_candidate_dates
+                    ):
                         continue
                     if symbol == query.symbol:
                         candidate_index = query_positions.get(candidate_date)
@@ -354,6 +371,7 @@ def _select_temporally_eligible_candidates(
     query_index: int,
     embargo_trading_days: int,
     budget: int,
+    eligible_candidate_dates: set[date] | None = None,
 ) -> dict[int, set[int]]:
     selected: dict[int, set[int]] = {}
     selected_count = 0
@@ -364,6 +382,8 @@ def _select_temporally_eligible_candidates(
         symbol, date_text = candidate
         candidate_date = date.fromisoformat(date_text)
         if candidate_date >= query_date:
+            continue
+        if eligible_candidate_dates is not None and candidate_date not in eligible_candidate_dates:
             continue
         if symbol == query_symbol:
             candidate_index = query_positions.get(candidate_date)

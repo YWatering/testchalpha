@@ -28,6 +28,7 @@ kline-ann-index = "kline_retrieval.ann_index:main"
 kline-precompute-ann = "kline_retrieval.ann_precompute_cli:main"
 kline-ann-search-worker = "kline_retrieval.ann_search_worker:main"
 kline-build-stage15-pool = "kline_retrieval.stage15_pool:main"
+kline-stage15-weekly = "kline_retrieval.stage15_weekly:main"
 
 [project.optional-dependencies]
 web = [

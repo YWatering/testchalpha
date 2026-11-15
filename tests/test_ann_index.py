@@ -57,6 +57,26 @@ class ANNIndexTests(unittest.TestCase):
 
         self.assertEqual(selected, {1: {3, 4}})
 
+    def test_temporal_prefilter_can_restrict_candidate_dates(self) -> None:
+        query_date = date(2024, 1, 12)
+        selected = _select_temporally_eligible_candidates(
+            [(0.99, 0, 1), (0.98, 0, 2), (0.97, 0, 3)],
+            {
+                (0, 1): ("OTHER", "2024-01-04"),
+                (0, 2): ("OTHER", "2024-01-05"),
+                (0, 3): ("OTHER", "2024-01-08"),
+            },
+            query_symbol="QUERY",
+            query_date=query_date,
+            query_positions={query_date: 0},
+            query_index=0,
+            embargo_trading_days=0,
+            eligible_candidate_dates={date(2024, 1, 5)},
+            budget=2,
+        )
+
+        self.assertEqual(selected, {0: {2}})
+
 
 if __name__ == "__main__":
     unittest.main()

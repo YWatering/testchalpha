@@ -1,0 +1,33 @@
+{
+  "ann_manifest": "data/processed/colproj_ann_stage14.json",
+  "ann_version_id": "ann-composite-c33c9e6e03bf9f40",
+  "candidate_k": 1000,
+  "candidate_rule": "weekly_signal_and_label_exit_not_later_than_query_date",
+  "database": "data/processed/csmar_a_share_daily.sqlite3",
+  "end_date": "2024-01-05",
+  "execution_return_rule": "raw_close_t_plus_5 / raw_open_t_plus_1 - 1",
+  "horizon_sessions": 5,
+  "model": "colproj",
+  "nprobe": 64,
+  "overfetch_k": 500,
+  "query_count": 5,
+  "reconstructed_source_hash": "4cdf937ddeb4c34fefd5c1ad558a9cd3ded8086bc72d4f1c5a135b59a2128f35",
+  "scale_weights": {
+    "daily": 1.0,
+    "monthly": 1.0,
+    "weekly": 1.0
+  },
+  "schema_version": "stage15-colproj-pilot-v1",
+  "similarity_temperature": 0.25,
+  "start_date": "2024-01-05",
+  "stock_pool": "research/stage15/stock_pool.csv",
+  "successful_query_count": 5,
+  "symbols": [
+    "600519",
+    "000625",
+    "300750",
+    "688981",
+    "920021"
+  ],
+  "top_k": 20
+}
