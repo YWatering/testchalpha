@@ -1,12 +1,12 @@
 {
   "ann_manifest": "data/processed/colproj_ann_stage14.json",
-  "completed_count": 50,
-  "elapsed_seconds": 103.809,
+  "completed_count": 2550,
+  "elapsed_seconds": 3775.507,
   "error": null,
   "index_version": "ann-composite-c33c9e6e03bf9f40",
   "matches_output": "research/stage15/colproj_validation_matches.csv",
   "model": "colproj",
-  "newly_built": 50,
+  "newly_built": 2400,
   "parameters": {
     "candidate_k": 1000,
     "candidate_rule": "weekly_signal_and_label_exit_not_later_than_query_date",
@@ -83,9 +83,9 @@
     ]
   },
   "source_hash": "4cdf937ddeb4c34fefd5c1ad558a9cd3ded8086bc72d4f1c5a135b59a2128f35",
-  "status": "partial",
+  "status": "complete",
   "store": "data/processed/stage15_colproj_predictions.sqlite3",
-  "successful_query_count": 50,
+  "successful_query_count": 2550,
   "target_count": 2550,
-  "updated_at_utc": "2026-11-15T14:59:15.917580+00:00"
+  "updated_at_utc": "2026-11-15T16:08:24.863025+00:00"
 }

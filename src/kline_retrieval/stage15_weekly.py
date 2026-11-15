@@ -131,6 +131,30 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("research/stage15/colproj_validation_manifest.json"),
     )
+
+    analysis = subparsers.add_parser(
+        "analyze-colproj-validation",
+        help="汇总验证期ColProj预测质量与阈值对照",
+    )
+    analysis.add_argument(
+        "--store",
+        type=Path,
+        default=Path("data/processed/stage15_colproj_predictions.sqlite3"),
+    )
+    analysis.add_argument(
+        "--run-key",
+        default="fd94dc496f9fee87fc11751b64c5761651c517bac5cecfc1ee08f1c6924e147c",
+    )
+    analysis.add_argument(
+        "--report-output",
+        type=Path,
+        default=Path("research/stage15/COLPROJ_VALIDATION_RESULTS.md"),
+    )
+    analysis.add_argument(
+        "--thresholds-output",
+        type=Path,
+        default=Path("research/stage15/colproj_validation_thresholds.csv"),
+    )
     return parser
 
 
@@ -217,6 +241,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"progress: {result['completed_count']}/{result['target_count']}")
             print(f"newly_built: {result['newly_built']}")
             print(f"status: {result['status']}")
+            return 0
+
+        if args.command == "analyze-colproj-validation":
+            result = analyze_colproj_validation(args.store, args.run_key)
+            write_validation_analysis(
+                result,
+                report_path=args.report_output,
+                thresholds_path=args.thresholds_output,
+            )
+            print(f"prediction_count: {result['summary']['sample_count']}")
+            print(f"direction_accuracy: {result['summary']['direction_accuracy']:.4f}")
+            print(f"pearson_correlation: {result['summary']['pearson_correlation']:.4f}")
+            print(f"report: {args.report_output}")
             return 0
 
         result = run_colproj_pilot(
@@ -515,9 +552,6 @@ def run_colproj_pilot(
     max_queries: int | None = None,
     selected_symbols: Sequence[str] | None = None,
     config: ProjectConfig = DEFAULT_CONFIG,
-    completed_keys: set[tuple[str, date]] | None = None,
-    on_query: Callable[[dict[str, object], list[dict[str, object]]], None] | None = None,
-    progress: bool = False,
 ) -> dict[str, object]:
     if (
         top_k <= 0
@@ -560,32 +594,11 @@ def run_colproj_pilot(
     predictions: list[dict[str, object]] = []
     match_rows: list[dict[str, object]] = []
     label_cache: dict[tuple[str, date], TradableLabel] = {}
-    previously_completed = completed_keys or set()
     processed = 0
-
-    def record_query(
-        prediction: dict[str, object],
-        query_matches: list[dict[str, object]],
-    ) -> None:
-        predictions.append(prediction)
-        match_rows.extend(query_matches)
-        if on_query is not None:
-            on_query(prediction, query_matches)
-        if progress:
-            print(
-                f"progress: new={len(predictions)} symbol={prediction['symbol']} "
-                f"date={prediction['signal_date']} status={prediction['status']} "
-                f"ann_ms={prediction.get('ann_ms', '')}",
-                flush=True,
-            )
-
     try:
         with sqlite3.connect(uri, uri=True, timeout=60) as connection:
             for schedule in query_schedule:
                 for symbol in symbols:
-                    query_key = (symbol, schedule.signal_date)
-                    if query_key in previously_completed:
-                        continue
                     if max_queries is not None and processed >= max_queries:
                         break
                     processed += 1
@@ -597,9 +610,8 @@ def run_colproj_pilot(
                             config=config,
                         )
                     except MarketDataError as exc:
-                        record_query(
-                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc)),
-                            [],
+                        predictions.append(
+                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc))
                         )
                         continue
                     matches, diagnostics = ann_index.search(
@@ -636,15 +648,14 @@ def run_colproj_pilot(
                         top_k=top_k,
                     )
                     if len(eligible) < minimum_matches:
-                        record_query(
+                        predictions.append(
                             {
                                 **_prediction_identity(symbol, schedule),
                                 "status": "insufficient_eligible_matches",
                                 "error": "",
                                 "eligible_match_count": len(eligible),
                                 **diagnostics,
-                            },
-                            [],
+                            }
                         )
                         continue
                     selected_matches = tuple(item[0] for item in eligible)
@@ -660,28 +671,29 @@ def run_colproj_pilot(
                         [(symbol, schedule.signal_date)],
                         schedule_by_date,
                     ).get((symbol, schedule.signal_date))
-                    prediction = {
-                        **_prediction_identity(symbol, schedule),
-                        "status": "ok",
-                        "error": "",
-                        "eligible_match_count": len(eligible),
-                        "predicted_return": statistics.weighted_mean,
-                        "weighted_std": statistics.weighted_std,
-                        "signal_strength": statistics.signal_strength,
-                        "positive_probability": statistics.weighted_win_rate,
-                        "effective_sample_size": statistics.effective_sample_size,
-                        "standard_error": statistics.standard_error,
-                        "lower_bound": statistics.lower_bound,
-                        "upper_bound": statistics.upper_bound,
-                        "minimum_distance": min(item.distance for item in selected_matches),
-                        "maximum_distance": max(item.distance for item in selected_matches),
-                        "actual_status": actual.status if actual else "missing_label",
-                        "actual_gross_return": actual.gross_return if actual else None,
-                        **diagnostics,
-                    }
-                    current_match_rows: list[dict[str, object]] = []
+                    predictions.append(
+                        {
+                            **_prediction_identity(symbol, schedule),
+                            "status": "ok",
+                            "error": "",
+                            "eligible_match_count": len(eligible),
+                            "predicted_return": statistics.weighted_mean,
+                            "weighted_std": statistics.weighted_std,
+                            "signal_strength": statistics.signal_strength,
+                            "positive_probability": statistics.weighted_win_rate,
+                            "effective_sample_size": statistics.effective_sample_size,
+                            "standard_error": statistics.standard_error,
+                            "lower_bound": statistics.lower_bound,
+                            "upper_bound": statistics.upper_bound,
+                            "minimum_distance": min(item.distance for item in selected_matches),
+                            "maximum_distance": max(item.distance for item in selected_matches),
+                            "actual_status": actual.status if actual else "missing_label",
+                            "actual_gross_return": actual.gross_return if actual else None,
+                            **diagnostics,
+                        }
+                    )
                     for match, label, weight in zip(selected_matches, selected_labels, weights):
-                        current_match_rows.append(
+                        match_rows.append(
                             {
                                 "query_symbol": symbol,
                                 "query_date": schedule.signal_date.isoformat(),
@@ -697,7 +709,6 @@ def run_colproj_pilot(
                                 "candidate_gross_return": label.gross_return,
                             }
                         )
-                    record_query(prediction, current_match_rows)
                 if max_queries is not None and processed >= max_queries:
                     break
     finally:
@@ -857,6 +868,248 @@ def run_colproj_batch(
         "matches_output": str(matches_output),
         "elapsed_seconds": round(perf_counter() - started, 3),
     }
+
+
+def analyze_colproj_validation(
+    store_path: str | Path,
+    run_key: str,
+) -> dict[str, object]:
+    store = Stage15PredictionStore(store_path)
+    run = store.run_status(run_key)
+    if run["status"] != "complete":
+        raise ValueError(f"验证任务尚未完成: {run['completed_count']}/{run['target_count']}")
+    if run["model"] != "colproj":
+        raise ValueError("验证任务不是ColProj")
+    rows = [
+        row
+        for row in store.load_predictions(run_key)
+        if row.get("status") == "ok"
+        and row.get("actual_status") == "tradable"
+        and row.get("predicted_return") is not None
+        and row.get("actual_gross_return") is not None
+    ]
+    if len(rows) != run["target_count"]:
+        raise ValueError("验证预测存在失败或真实收益缺失，不能计算完整报告")
+
+    predicted = [float(row["predicted_return"]) for row in rows]
+    actual = [float(row["actual_gross_return"]) for row in rows]
+    errors = [prediction - outcome for prediction, outcome in zip(predicted, actual)]
+    summary = {
+        "sample_count": len(rows),
+        "mean_predicted_return": _mean(predicted),
+        "mean_actual_return": _mean(actual),
+        "median_actual_return": _quantile(actual, 0.5),
+        "direction_accuracy": sum(
+            (prediction > 0) == (outcome > 0)
+            for prediction, outcome in zip(predicted, actual)
+        )
+        / len(rows),
+        "mae": _mean([abs(error) for error in errors]),
+        "rmse": math.sqrt(_mean([error * error for error in errors])),
+        "pearson_correlation": _correlation(predicted, actual),
+        "weekly_mean_pearson_correlation": _mean(
+            value["pearson_correlation"]
+            for value in _weekly_correlations(rows)
+            if value["pearson_correlation"] is not None
+        ),
+        "weekly_mean_spearman_correlation": _mean(
+            value["spearman_correlation"]
+            for value in _weekly_correlations(rows)
+            if value["spearman_correlation"] is not None
+        ),
+        "week_count": len({str(row["signal_date"]) for row in rows}),
+    }
+    thresholds = []
+    for threshold in (0.0, 0.005, 0.01, 0.015, 0.02, 0.05):
+        selected = [row for row in rows if float(row["predicted_return"]) >= threshold]
+        thresholds.append(_threshold_summary(selected, threshold, None))
+    for min_strength in (0.25, 0.5, 1.0):
+        selected = [
+            row
+            for row in rows
+            if float(row["predicted_return"]) >= 0.01
+            and row.get("signal_strength") is not None
+            and float(row["signal_strength"]) >= min_strength
+        ]
+        thresholds.append(_threshold_summary(selected, 0.01, min_strength))
+
+    return {
+        "run": run,
+        "summary": summary,
+        "thresholds": thresholds,
+        "limitations": [
+            "这是验证期内的阈值分析，不是最终样本外测试结果。",
+            "收益是未扣成本的原始价格收益，不包含完整公司行为总回报。",
+            "阈值区间互相重叠，仅作描述性对照，不是相互独立的实验。",
+            "股票—周样本存在横截面和时间相关性，有效样本量低于记录条数。",
+        ],
+    }
+
+
+def _threshold_summary(
+    selected: Sequence[dict[str, object]],
+    threshold: float,
+    min_signal_strength: float | None,
+) -> dict[str, object]:
+    realized = [float(row["actual_gross_return"]) for row in selected]
+    predicted = [float(row["predicted_return"]) for row in selected]
+    return {
+        "predicted_return_threshold": threshold,
+        "minimum_signal_strength": min_signal_strength,
+        "sample_count": len(selected),
+        "coverage": len(selected),
+        "predicted_return_mean": _mean(predicted) if predicted else None,
+        "realized_return_mean": _mean(realized) if realized else None,
+        "realized_return_median": _quantile(realized, 0.5) if realized else None,
+        "realized_win_rate": (
+            sum(value > 0 for value in realized) / len(realized) if realized else None
+        ),
+    }
+
+
+def _weekly_correlations(rows: Sequence[dict[str, object]]) -> list[dict[str, object]]:
+    by_date: dict[str, list[dict[str, object]]] = {}
+    for row in rows:
+        by_date.setdefault(str(row["signal_date"]), []).append(row)
+    results = []
+    for signal_date, group in sorted(by_date.items()):
+        predicted = [float(row["predicted_return"]) for row in group]
+        actual = [float(row["actual_gross_return"]) for row in group]
+        results.append(
+            {
+                "signal_date": signal_date,
+                "sample_count": len(group),
+                "pearson_correlation": _correlation(predicted, actual),
+                "spearman_correlation": _correlation(
+                    _average_ranks(predicted), _average_ranks(actual)
+                ),
+            }
+        )
+    return results
+
+
+def _average_ranks(values: Sequence[float]) -> list[float]:
+    order = sorted(range(len(values)), key=lambda index: values[index])
+    ranks = [0.0] * len(values)
+    start = 0
+    while start < len(order):
+        end = start + 1
+        while end < len(order) and values[order[end]] == values[order[start]]:
+            end += 1
+        average_rank = (start + 1 + end) / 2
+        for position in range(start, end):
+            ranks[order[position]] = average_rank
+        start = end
+    return ranks
+
+
+def _correlation(left: Sequence[float], right: Sequence[float]) -> float | None:
+    if len(left) != len(right) or len(left) < 2:
+        return None
+    left_mean = _mean(left)
+    right_mean = _mean(right)
+    left_centered = [value - left_mean for value in left]
+    right_centered = [value - right_mean for value in right]
+    denominator = math.sqrt(
+        sum(value * value for value in left_centered)
+        * sum(value * value for value in right_centered)
+    )
+    if denominator == 0:
+        return None
+    return sum(a * b for a, b in zip(left_centered, right_centered)) / denominator
+
+
+def _mean(values: Iterable[float]) -> float:
+    items = tuple(float(value) for value in values)
+    return sum(items) / len(items) if items else 0.0
+
+
+def _quantile(values: Sequence[float], probability: float) -> float:
+    ordered = sorted(float(value) for value in values)
+    if not ordered:
+        return 0.0
+    position = probability * (len(ordered) - 1)
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1 - weight) + ordered[upper] * weight
+
+
+def write_validation_analysis(
+    result: dict[str, object],
+    *,
+    report_path: str | Path,
+    thresholds_path: str | Path,
+) -> None:
+    thresholds = list(result["thresholds"])
+    _write_csv(thresholds_path, thresholds)
+    summary = result["summary"]
+    limitations = "\n".join(f"- {item}" for item in result["limitations"])
+    threshold_lines = [
+        "| 预测收益阈值 | 稳定性下限 | 样本数 | 预测均值 | 实际毛收益均值 | 实际收益中位数 | 胜率 |",
+        "| ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+    ]
+    for item in thresholds:
+        threshold_lines.append(
+            "| {threshold:.2%} | {strength} | {count} | {predicted} | {mean} | {median} | {win} |".format(
+                threshold=float(item["predicted_return_threshold"]),
+                strength=(
+                    "-"
+                    if item["minimum_signal_strength"] is None
+                    else f"{float(item['minimum_signal_strength']):.2f}"
+                ),
+                count=item["sample_count"],
+                predicted=_format_percent(item["predicted_return_mean"]),
+                mean=_format_percent(item["realized_return_mean"]),
+                median=_format_percent(item["realized_return_median"]),
+                win=_format_percent(item["realized_win_rate"]),
+            )
+        )
+    text = f"""# 阶段十五：ColProj验证期预测结果
+
+## 样本与版本
+
+- 验证区间：`{result['run']['scope']['start_date']}` 至 `{result['run']['scope']['end_date']}`。
+- 股票—周样本数：{summary['sample_count']}；周数：{summary['week_count']}。
+- 模型：ColProj；索引版本：`{result['run']['index_version']}`。
+- 预测目标：未来5个市场交易日，下一交易日原始开盘买入至第5日原始收盘。
+- 预测参数和数据快照见 `colproj_validation_manifest.json`。
+
+## 整体预测表现
+
+| 指标 | 结果 |
+| --- | ---: |
+| 平均预测收益 | {_format_percent(summary['mean_predicted_return'])} |
+| 实际毛收益均值 | {_format_percent(summary['mean_actual_return'])} |
+| 实际收益中位数 | {_format_percent(summary['median_actual_return'])} |
+| 方向准确率 | {_format_percent(summary['direction_accuracy'])} |
+| MAE | {_format_percent(summary['mae'])} |
+| RMSE | {_format_percent(summary['rmse'])} |
+| 股票横截面 Pearson 相关 | {summary['pearson_correlation']:.4f} |
+| 周均 Pearson 相关 | {summary['weekly_mean_pearson_correlation']:.4f} |
+| 周均 Spearman 相关 | {summary['weekly_mean_spearman_correlation']:.4f} |
+
+方向准确率接近随机基线、相关性若接近零或为负，表示当前 ColProj 信号在验证期没有显示稳定的方向/排序能力。阈值收益只作验证期筛选，不代表未来表现。
+
+## 收益阈值与稳定性对照
+
+""" + "\n".join(threshold_lines) + f"""
+
+基准阈值网格为预测收益0%、0.5%、1%、1.5%、2%和5%；附加行是在预测收益至少1%时增加稳定性分数下限。没有仅凭最高历史收益自动选择阈值，最终规则还需检查交易成本、周度聚类稳定性和样本数量，并在测试期冻结。
+
+## 限制
+
+{limitations}
+
+当前阶段没有确认一个可用于实盘的买入阈值。若验证期阈值表现不稳定或扣费后优势消失，应报告策略未通过，而不是继续挑选更高阈值直到出现较好历史结果。
+"""
+    output = Path(report_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(text, encoding="utf-8")
+
+
+def _format_percent(value: object) -> str:
+    return "-" if value is None else f"{float(value):.2%}"
 
 
 def _load_candidate_labels(

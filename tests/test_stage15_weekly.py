@@ -13,6 +13,8 @@ from kline_retrieval.retrieval import (  # noqa: E402
 )
 from kline_retrieval.stage15_weekly import (  # noqa: E402
     TradableLabel,
+    _average_ranks,
+    _correlation,
     build_weekly_schedule,
     calculate_tradable_label,
     filter_labeled_matches,
@@ -20,6 +22,11 @@ from kline_retrieval.stage15_weekly import (  # noqa: E402
 
 
 class Stage15WeeklyTests(unittest.TestCase):
+    def test_rank_correlation_helpers_handle_ties_and_constants(self) -> None:
+        self.assertEqual(_average_ranks([2.0, 1.0, 1.0, 3.0]), [3.0, 1.5, 1.5, 4.0])
+        self.assertAlmostEqual(_correlation([1.0, 2.0, 3.0], [2.0, 4.0, 6.0]), 1.0)
+        self.assertIsNone(_correlation([1.0, 1.0], [2.0, 3.0]))
+
     def test_schedule_uses_last_observed_session_and_global_horizon(self) -> None:
         market_dates = tuple(
             date.fromisoformat(value)
