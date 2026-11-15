@@ -10,13 +10,16 @@ import sqlite3
 from dataclasses import asdict, dataclass, replace
 from datetime import date
 from pathlib import Path
-from typing import Iterable, Sequence
+from time import perf_counter
+from typing import Callable, Iterable, Sequence
 
 from .analytics import similarity_weights, summarize_returns
 from .ann_index import MultiScaleANNIndex
+from .ann_worker_client import read_ann_manifest_metadata
 from .config import DEFAULT_CONFIG, ProjectConfig
 from .market_data import MarketData, MarketDataError
 from .retrieval import SimilarityMatch, build_sample_embedding
+from .stage15_store import Stage15PredictionStore
 
 
 @dataclass(frozen=True, slots=True)
@@ -80,16 +83,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     predict = subparsers.add_parser("predict-colproj", help="运行ColProj周频预测试点")
     _add_common_arguments(predict)
-    predict.add_argument(
-        "--ann-manifest",
-        type=Path,
-        default=Path("data/processed/colproj_ann_stage14.json"),
-    )
-    predict.add_argument("--top-k", type=int, default=20)
-    predict.add_argument("--overfetch-k", type=int, default=500)
-    predict.add_argument("--candidate-k", type=int, default=1000)
-    predict.add_argument("--nprobe", type=int, default=64)
-    predict.add_argument("--minimum-matches", type=int, default=20)
+    _add_colproj_arguments(predict)
     predict.add_argument("--max-queries", type=int)
     predict.add_argument("--symbol", action="append", dest="symbols")
     predict.add_argument(
@@ -107,7 +101,50 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("research/stage15/colproj_prediction_pilot_manifest.json"),
     )
+
+    batch = subparsers.add_parser(
+        "predict-colproj-batch",
+        help="断点续跑ColProj周频批量预测",
+    )
+    _add_common_arguments(batch)
+    _add_colproj_arguments(batch)
+    batch.add_argument("--max-new-queries", type=int, default=100)
+    batch.add_argument("--all", action="store_true", help="处理范围内全部缺失查询")
+    batch.add_argument("--symbol", action="append", dest="symbols")
+    batch.add_argument(
+        "--store",
+        type=Path,
+        default=Path("data/processed/stage15_colproj_predictions.sqlite3"),
+    )
+    batch.add_argument(
+        "--predictions-output",
+        type=Path,
+        default=Path("research/stage15/colproj_validation_predictions.csv"),
+    )
+    batch.add_argument(
+        "--matches-output",
+        type=Path,
+        default=Path("research/stage15/colproj_validation_matches.csv"),
+    )
+    batch.add_argument(
+        "--manifest-output",
+        type=Path,
+        default=Path("research/stage15/colproj_validation_manifest.json"),
+    )
     return parser
+
+
+def _add_colproj_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--ann-manifest",
+        type=Path,
+        default=Path("data/processed/colproj_ann_stage14.json"),
+    )
+    parser.add_argument("--top-k", type=int, default=20)
+    parser.add_argument("--overfetch-k", type=int, default=500)
+    parser.add_argument("--candidate-k", type=int, default=1000)
+    parser.add_argument("--nprobe", type=int, default=64)
+    parser.add_argument("--minimum-matches", type=int, default=20)
 
 
 def _add_common_arguments(parser: argparse.ArgumentParser) -> None:
@@ -147,6 +184,39 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"weekly_signals: {len(result['schedule'])}")
             print(f"labels: {len(result['labels'])}")
             print(f"tradable_labels: {result['manifest']['tradable_label_count']}")
+            return 0
+
+        if args.command == "predict-colproj-batch":
+            if not args.all and args.max_new_queries <= 0:
+                raise ValueError("max-new-queries 必须大于 0，或使用 --all")
+            result = run_colproj_batch(
+                args.database,
+                args.stock_pool,
+                args.ann_manifest,
+                args.store,
+                start_date=args.start_date,
+                end_date=args.end_date,
+                horizon_sessions=args.horizon_sessions,
+                top_k=args.top_k,
+                overfetch_k=args.overfetch_k,
+                candidate_k=args.candidate_k,
+                nprobe=args.nprobe,
+                minimum_matches=args.minimum_matches,
+                max_new_queries=None if args.all else args.max_new_queries,
+                selected_symbols=args.symbols,
+                predictions_output=args.predictions_output,
+                matches_output=args.matches_output,
+            )
+            output = Path(args.manifest_output)
+            output.parent.mkdir(parents=True, exist_ok=True)
+            output.write_text(
+                json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+            print(f"run_key: {result['run_key']}")
+            print(f"progress: {result['completed_count']}/{result['target_count']}")
+            print(f"newly_built: {result['newly_built']}")
+            print(f"status: {result['status']}")
             return 0
 
         result = run_colproj_pilot(
@@ -445,6 +515,9 @@ def run_colproj_pilot(
     max_queries: int | None = None,
     selected_symbols: Sequence[str] | None = None,
     config: ProjectConfig = DEFAULT_CONFIG,
+    completed_keys: set[tuple[str, date]] | None = None,
+    on_query: Callable[[dict[str, object], list[dict[str, object]]], None] | None = None,
+    progress: bool = False,
 ) -> dict[str, object]:
     if (
         top_k <= 0
@@ -487,11 +560,32 @@ def run_colproj_pilot(
     predictions: list[dict[str, object]] = []
     match_rows: list[dict[str, object]] = []
     label_cache: dict[tuple[str, date], TradableLabel] = {}
+    previously_completed = completed_keys or set()
     processed = 0
+
+    def record_query(
+        prediction: dict[str, object],
+        query_matches: list[dict[str, object]],
+    ) -> None:
+        predictions.append(prediction)
+        match_rows.extend(query_matches)
+        if on_query is not None:
+            on_query(prediction, query_matches)
+        if progress:
+            print(
+                f"progress: new={len(predictions)} symbol={prediction['symbol']} "
+                f"date={prediction['signal_date']} status={prediction['status']} "
+                f"ann_ms={prediction.get('ann_ms', '')}",
+                flush=True,
+            )
+
     try:
         with sqlite3.connect(uri, uri=True, timeout=60) as connection:
             for schedule in query_schedule:
                 for symbol in symbols:
+                    query_key = (symbol, schedule.signal_date)
+                    if query_key in previously_completed:
+                        continue
                     if max_queries is not None and processed >= max_queries:
                         break
                     processed += 1
@@ -503,8 +597,9 @@ def run_colproj_pilot(
                             config=config,
                         )
                     except MarketDataError as exc:
-                        predictions.append(
-                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc))
+                        record_query(
+                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc)),
+                            [],
                         )
                         continue
                     matches, diagnostics = ann_index.search(
@@ -541,14 +636,15 @@ def run_colproj_pilot(
                         top_k=top_k,
                     )
                     if len(eligible) < minimum_matches:
-                        predictions.append(
+                        record_query(
                             {
                                 **_prediction_identity(symbol, schedule),
                                 "status": "insufficient_eligible_matches",
                                 "error": "",
                                 "eligible_match_count": len(eligible),
                                 **diagnostics,
-                            }
+                            },
+                            [],
                         )
                         continue
                     selected_matches = tuple(item[0] for item in eligible)
@@ -564,29 +660,28 @@ def run_colproj_pilot(
                         [(symbol, schedule.signal_date)],
                         schedule_by_date,
                     ).get((symbol, schedule.signal_date))
-                    predictions.append(
-                        {
-                            **_prediction_identity(symbol, schedule),
-                            "status": "ok",
-                            "error": "",
-                            "eligible_match_count": len(eligible),
-                            "predicted_return": statistics.weighted_mean,
-                            "weighted_std": statistics.weighted_std,
-                            "signal_strength": statistics.signal_strength,
-                            "positive_probability": statistics.weighted_win_rate,
-                            "effective_sample_size": statistics.effective_sample_size,
-                            "standard_error": statistics.standard_error,
-                            "lower_bound": statistics.lower_bound,
-                            "upper_bound": statistics.upper_bound,
-                            "minimum_distance": min(item.distance for item in selected_matches),
-                            "maximum_distance": max(item.distance for item in selected_matches),
-                            "actual_status": actual.status if actual else "missing_label",
-                            "actual_gross_return": actual.gross_return if actual else None,
-                            **diagnostics,
-                        }
-                    )
+                    prediction = {
+                        **_prediction_identity(symbol, schedule),
+                        "status": "ok",
+                        "error": "",
+                        "eligible_match_count": len(eligible),
+                        "predicted_return": statistics.weighted_mean,
+                        "weighted_std": statistics.weighted_std,
+                        "signal_strength": statistics.signal_strength,
+                        "positive_probability": statistics.weighted_win_rate,
+                        "effective_sample_size": statistics.effective_sample_size,
+                        "standard_error": statistics.standard_error,
+                        "lower_bound": statistics.lower_bound,
+                        "upper_bound": statistics.upper_bound,
+                        "minimum_distance": min(item.distance for item in selected_matches),
+                        "maximum_distance": max(item.distance for item in selected_matches),
+                        "actual_status": actual.status if actual else "missing_label",
+                        "actual_gross_return": actual.gross_return if actual else None,
+                        **diagnostics,
+                    }
+                    current_match_rows: list[dict[str, object]] = []
                     for match, label, weight in zip(selected_matches, selected_labels, weights):
-                        match_rows.append(
+                        current_match_rows.append(
                             {
                                 "query_symbol": symbol,
                                 "query_date": schedule.signal_date.isoformat(),
@@ -602,6 +697,7 @@ def run_colproj_pilot(
                                 "candidate_gross_return": label.gross_return,
                             }
                         )
+                    record_query(prediction, current_match_rows)
                 if max_queries is not None and processed >= max_queries:
                     break
     finally:
@@ -635,6 +731,132 @@ def run_colproj_pilot(
         "execution_return_rule": "raw_close_t_plus_5 / raw_open_t_plus_1 - 1",
     }
     return {"predictions": predictions, "matches": match_rows, "manifest": manifest}
+
+
+def run_colproj_batch(
+    database_path: str | Path,
+    stock_pool_path: str | Path,
+    ann_manifest_path: str | Path,
+    store_path: str | Path,
+    *,
+    start_date: str,
+    end_date: str,
+    horizon_sessions: int = 5,
+    top_k: int = 20,
+    overfetch_k: int = 500,
+    candidate_k: int = 1000,
+    nprobe: int = 64,
+    minimum_matches: int = 20,
+    max_new_queries: int | None = 100,
+    selected_symbols: Sequence[str] | None = None,
+    predictions_output: str | Path,
+    matches_output: str | Path,
+    config: ProjectConfig = DEFAULT_CONFIG,
+) -> dict[str, object]:
+    """Run missing weekly queries and persist every completed key atomically."""
+
+    if max_new_queries is not None and max_new_queries <= 0:
+        raise ValueError("max_new_queries must be positive or None")
+    all_symbols = load_stock_pool(stock_pool_path)
+    symbols = tuple(selected_symbols or all_symbols)
+    unknown = sorted(set(symbols) - set(all_symbols))
+    if unknown:
+        raise ValueError(f"指定股票不在阶段十五股票池: {', '.join(unknown)}")
+
+    database = Path(database_path)
+    uri = f"file:{database.resolve()}?mode=ro"
+    with sqlite3.connect(uri, uri=True, timeout=60) as connection:
+        market_dates = load_market_dates(connection)
+    query_schedule = build_weekly_schedule(
+        market_dates,
+        start_date=start_date,
+        end_date=end_date,
+        horizon_sessions=horizon_sessions,
+    )
+    target_count = len(query_schedule) * len(symbols)
+    ann_metadata = read_ann_manifest_metadata(ann_manifest_path)
+    if ann_metadata.model != "colproj":
+        raise ValueError("阶段十五ColProj批处理要求使用ColProj ANN清单")
+
+    parameters = {
+        "horizon_sessions": horizon_sessions,
+        "top_k": top_k,
+        "overfetch_k": overfetch_k,
+        "candidate_k": candidate_k,
+        "nprobe": nprobe,
+        "minimum_matches": minimum_matches,
+        "similarity_temperature": config.similarity_temperature,
+        "month_weight": config.month_weight,
+        "week_weight": config.week_weight,
+        "day_weight": config.day_weight,
+        "chart_width": config.chart_width,
+        "chart_height": config.chart_height,
+        "candidate_rule": "weekly_signal_and_label_exit_not_later_than_query_date",
+        "execution_return_rule": "raw_close_t_plus_5 / raw_open_t_plus_1 - 1",
+    }
+    scope = {
+        "stock_pool": str(stock_pool_path),
+        "symbols": list(symbols),
+        "start_date": start_date,
+        "end_date": end_date,
+    }
+    store = Stage15PredictionStore(store_path)
+    run_key = store.begin_run(
+        model="colproj",
+        index_version=ann_metadata.version_id,
+        source_hash=ann_metadata.source_hash,
+        parameters=parameters,
+        scope=scope,
+        target_count=target_count,
+    )
+    completed_before = store.completed_keys(run_key)
+    started = perf_counter()
+    try:
+        result = run_colproj_pilot(
+            database,
+            stock_pool_path,
+            ann_manifest_path,
+            start_date=start_date,
+            end_date=end_date,
+            horizon_sessions=horizon_sessions,
+            top_k=top_k,
+            overfetch_k=overfetch_k,
+            candidate_k=candidate_k,
+            nprobe=nprobe,
+            minimum_matches=minimum_matches,
+            max_queries=max_new_queries,
+            selected_symbols=symbols,
+            config=config,
+            completed_keys=completed_before,
+            on_query=lambda prediction, matches: store.put_query(
+                run_key, prediction, matches
+            ),
+            progress=True,
+        )
+        completed_count = len(store.completed_keys(run_key))
+        status = "complete" if completed_count == target_count else "partial"
+        store.finish_run(run_key, status=status)
+    except Exception as exc:
+        store.finish_run(run_key, status="failed", error=str(exc))
+        raise
+
+    store.export_csv(
+        run_key,
+        predictions_path=predictions_output,
+        matches_path=matches_output,
+    )
+    run_status = store.run_status(run_key)
+    predictions = store.load_predictions(run_key)
+    return {
+        **run_status,
+        "store": str(store.path),
+        "ann_manifest": str(ann_manifest_path),
+        "newly_built": len(result["predictions"]),
+        "successful_query_count": sum(row.get("status") == "ok" for row in predictions),
+        "predictions_output": str(predictions_output),
+        "matches_output": str(matches_output),
+        "elapsed_seconds": round(perf_counter() - started, 3),
+    }
 
 
 def _load_candidate_labels(

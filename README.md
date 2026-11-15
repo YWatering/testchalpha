@@ -328,6 +328,17 @@ KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
 
 周频标签使用市场统一交易日：信号周的最后交易日收盘生成特征，下一市场交易日原始开盘价入场，第5个市场交易日原始收盘价退出。候选只有在其退出日不晚于当前查询日时才可参与预测。生成结果见 [周频标签报告](research/stage15/WEEKLY_DATASET.md)。
 
+验证期批量预测使用 SQLite 逐条提交并支持断点续跑：
+
+```bash
+.venv/bin/kline-stage15-weekly predict-colproj-batch \
+  --start-date 2024-01-01 \
+  --end-date 2024-12-31 \
+  --max-new-queries 100
+```
+
+相同数据版本、ANN版本、参数和时间范围会复用同一个任务；已经完成的股票—周查询会跳过。使用 `--all` 可继续处理当前范围内的全部缺失查询。当前验证期进度和实测吞吐见 [ColProj验证期进度](research/stage15/COLPROJ_VALIDATION.md)。
+
 用下载的数据启动网页：
 
 ```bash
