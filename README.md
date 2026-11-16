@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 已完成双模型 ANN 分片、综合索引、隔离预计算 worker 和 API 物化缓存命中，当前暂缓全市场100%物化。阶段15的ColProj主链路已完成：固定50只股票研究池、145个周度标签、2024验证期预测、截至2024年底训练码本的独立OOS索引，以及2025—2026共4,700条样本外预测。4,633条可评估记录的方向准确率为49.58%、Pearson相关为0.0015，未确认稳定预测优势；固定1%参考规则组合累计收益18.92%，但尚未加入固定50只等权和宽基基准，不能作信号归因。后续仍需复核公司行为与成交限制，并完成CNN公平对照。收益率字段语义与异常缩放记录的人工复核仍待完成。
+阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 已完成双模型 ANN 分片、综合索引、隔离预计算 worker 和 API 物化缓存命中，当前暂缓全市场100%物化。阶段15的ColProj主链路已完成：固定50只股票研究池、145个周度标签、2024验证期预测、截至2024年底训练码本的独立OOS索引，以及2025—2026共4,700条样本外预测。4,633条可评估记录的方向准确率为49.58%、Pearson相关为0.0015，未确认稳定预测优势。固定1%参考规则组合累计收益18.92%，固定50只股票等权基准为13.32%；策略高5.60个百分点，但周超额收益检验不显著，不能确认超额来自稳定预测能力。后续仍需复核公司行为与成交限制，并完成宽基和CNN公平对照。收益率字段语义与异常缩放记录的人工复核仍待完成。
 
 阶段 0 交付内容：
 
@@ -367,6 +367,22 @@ KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
 ```
 
 4,700条任务已全部完成，其中4,689条成功预测、4,633条具有可评估真实收益。预测报告见[OOS预测结果](research/stage15/COLPROJ_OOS_RESULTS.md)，固定1%参考组合见[OOS组合结果](research/stage15/COLPROJ_OOS_PORTFOLIO_RESULTS.md)。
+
+固定50只股票等权基准使用相同周历、开盘调仓、整手、费用和成交阻断规则，但完全不读取预测值：
+
+```bash
+.venv/bin/kline-stage15-portfolio \
+  --predictions research/stage15/colproj_oos_predictions.csv \
+  --start-date 2025-01-01 --end-date 2026-10-16 \
+  --benchmark-all-stocks \
+  --weekly-output research/stage15/equal_weight_benchmark_weekly.csv \
+  --trades-output research/stage15/equal_weight_benchmark_trades.csv \
+  --manifest-output research/stage15/equal_weight_benchmark_manifest.json \
+  --report-output research/stage15/EQUAL_WEIGHT_BENCHMARK_RESULTS.md \
+  --evaluation-period out-of-sample
+```
+
+每周等权再平衡基准累计收益为13.32%，1%策略高5.60个百分点，但93组周超额收益的简单配对检验不显著。完整结论见[策略与固定池等权基准对照](research/stage15/COLPROJ_OOS_BENCHMARK_COMPARISON.md)。固定池初始等权买入持有和宽基基准仍待补充。
 
 验证期组合交易模拟命令（默认使用预测收益阈值1%作为待评估情景，不代表已选定的有效阈值）：
 

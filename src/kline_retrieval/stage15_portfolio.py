@@ -74,6 +74,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--minimum-commission", type=float, default=5.0)
     parser.add_argument("--lot-size", type=int, default=100)
     parser.add_argument(
+        "--benchmark-all-stocks",
+        action="store_true",
+        help="忽略预测值，每周对固定股票池全部股票等权再平衡",
+    )
+    parser.add_argument(
         "--weekly-output",
         type=Path,
         default=Path("research/stage15/colproj_portfolio_weekly.csv"),
@@ -119,6 +124,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     predictions = load_predictions(args.predictions, args.start_date, args.end_date)
     symbols = load_stock_pool(args.stock_pool)
+    if args.benchmark_all_stocks:
+        predictions = build_equal_weight_benchmark(predictions, symbols)
     bars, boards, market_dates = load_database_data(
         args.database,
         symbols,
@@ -135,8 +142,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_capital=args.initial_capital,
         costs=costs,
     )
+    result["parameters"]["selection_rule"] = (
+        "all_pool_stocks_equal_weight"
+        if args.benchmark_all_stocks
+        else "predicted_return_threshold"
+    )
+    if args.benchmark_all_stocks:
+        result["parameters"]["threshold"] = None
     grid = []
-    for threshold in _parse_threshold_grid(args.threshold_grid):
+    thresholds = (
+        ()
+        if args.benchmark_all_stocks
+        else _parse_threshold_grid(args.threshold_grid)
+    )
+    for threshold in thresholds:
         candidate = simulate_portfolio(
             predictions,
             bars,
@@ -207,6 +226,30 @@ def load_predictions(
     if not output:
         raise ValueError("预测文件中没有可模拟的股票—周记录")
     return output
+
+
+def build_equal_weight_benchmark(
+    predictions: dict[date, list[dict[str, object]]],
+    symbols: Sequence[str],
+) -> dict[date, list[dict[str, object]]]:
+    """Use prediction rows only as a weekly calendar and select the full fixed pool."""
+
+    benchmark: dict[date, list[dict[str, object]]] = {}
+    for signal_date, rows in predictions.items():
+        entry_date = _single_date(rows, "entry_date")
+        exit_date = _single_date(rows, "exit_date")
+        benchmark[signal_date] = [
+            {
+                "symbol": symbol,
+                "signal_date": signal_date,
+                "entry_date": entry_date,
+                "exit_date": exit_date,
+                "predicted_return": 1.0,
+                "signal_strength": None,
+            }
+            for symbol in symbols
+        ]
+    return benchmark
 
 
 def load_stock_pool(path: str | Path) -> tuple[str, ...]:
@@ -449,7 +492,8 @@ def write_result(
 ) -> None:
     _write_rows(weekly_path, result["weekly"])
     _write_rows(trades_path, [asdict(trade) for trade in result["trades"]])
-    _write_rows(thresholds_path, threshold_grid)
+    if threshold_grid:
+        _write_rows(thresholds_path, threshold_grid)
     manifest = {"schema_version": "stage15-portfolio-v1", "parameters": result["parameters"], "metrics": result["metrics"], "weekly_count": len(result["weekly"]), "trade_count": len(result["trades"]), "threshold_grid": list(threshold_grid), "execution_price_basis": "raw_open_and_raw_close", "limitations": ["收益为价格收益，未包含现金分红总回报。", "涨跌停状态根据日线OHLC、昨收盘和板块比例保守推断，数据库没有交易所原始涨跌停状态字段。", "期末持仓按最后可见收盘价估值，未额外模拟期末强制平仓成本。", "结果是研究模拟，不是实盘建议。"]}
     output = Path(manifest_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -459,12 +503,60 @@ def write_result(
     weekly_name = Path(weekly_path).name
     trades_name = Path(trades_path).name
     thresholds_name = Path(thresholds_path).name
-    text = f"""# 阶段十五：ColProj周频组合模拟
+    is_benchmark = result["parameters"].get("selection_rule") == "all_pool_stocks_equal_weight"
+    selection_description = (
+        "每个信号周选择固定股票池全部股票并等权再平衡，不使用模型预测。"
+        if is_benchmark
+        else f"预测收益不低于 `{result['parameters']['threshold']:.2%}`"
+        + (
+            f"，稳定性分数不低于 `{result['parameters']['min_signal_strength']:.2f}`。"
+            if result["parameters"]["min_signal_strength"] is not None
+            else "。"
+        )
+    )
+    sensitivity = ""
+    if threshold_grid:
+        sensitivity = f"""
+## {period_name}阈值敏感性
+
+| 预测收益阈值 | 入选信号数 | 累计收益 | 最大回撤 | Sharpe | 交易成本 |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+""" + "\n".join(
+            "| {threshold:.2%} | {count} | {return_:.2%} | {drawdown:.2%} | {sharpe:.3f} | {cost:.2f} |".format(
+                threshold=float(row["predicted_return_threshold"]),
+                count=int(row["selected_signal_count"]),
+                return_=float(row["cumulative_return"]),
+                drawdown=float(row["max_drawdown"]),
+                sharpe=float(row["sharpe_zero_rf"]),
+                cost=float(row["total_transaction_cost"]),
+            )
+            for row in threshold_grid
+        ) + f"""
+
+阈值网格仅作为同一{period_name}上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `{thresholds_name}`。
+"""
+    report_title = "固定50只股票等权基准" if is_benchmark else "ColProj周频组合模拟"
+    input_description = (
+        "预测文件仅用于取得相同周频交易日历，不使用任何预测值。"
+        if is_benchmark
+        else "网站同口径生成的 ColProj 周频预测结果。"
+    )
+    rule_limitation = (
+        "这是不使用预测信号的固定股票池基准，用于比较市场和股票池本身的收益。"
+        if is_benchmark
+        else "除事先指定的1%参考规则外，其他阈值不得用于回看挑选策略。"
+    )
+    conclusion = (
+        "本报告是比较基准，不代表推荐等权持有这些股票。"
+        if is_benchmark
+        else "当前 ColProj 预测统计尚未确认稳定买入优势，报告不是实盘收益预测。"
+    )
+    text = f"""# 阶段十五：{report_title}
 
 ## 模拟口径
 
-- 预测输入：网站同口径生成的 ColProj 周频预测结果。
-- 买入条件：预测收益不低于 `{result['parameters']['threshold']:.2%}`""" + (f"，稳定性分数不低于 `{result['parameters']['min_signal_strength']:.2f}`。" if result["parameters"]["min_signal_strength"] is not None else "。") + f"""
+- 输入：{input_description}
+- 选择规则：{selection_description}
 - 交易：下一市场交易日开盘调仓，第5个市场交易日收盘估值。
 - 仓位：满足条件的股票等权，单只股票目标权重不超过10%，剩余资金保留现金。
 - 成本：佣金、卖出印花税、双边滑点和100股整手约束均纳入。
@@ -490,32 +582,16 @@ def write_result(
 
 逐周结果见 `{weekly_name}`，逐笔交易见 `{trades_name}`。涨跌停阻断和缺失行情不会被静默当作已成交，而会在逐笔交易文件中记录原因。
 
-## {period_name}阈值敏感性
-
-| 预测收益阈值 | 入选信号数 | 累计收益 | 最大回撤 | Sharpe | 交易成本 |
-| ---: | ---: | ---: | ---: | ---: | ---: |
-""" + "\n".join(
-        "| {threshold:.2%} | {count} | {return_:.2%} | {drawdown:.2%} | {sharpe:.3f} | {cost:.2f} |".format(
-            threshold=float(row["predicted_return_threshold"]),
-            count=int(row["selected_signal_count"]),
-            return_=float(row["cumulative_return"]),
-            drawdown=float(row["max_drawdown"]),
-            sharpe=float(row["sharpe_zero_rf"]),
-            cost=float(row["total_transaction_cost"]),
-        )
-        for row in threshold_grid
-    ) + f"""
-
-阈值网格仅作为同一{period_name}上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `{thresholds_name}`。
+{sensitivity}
 
 ## 限制
 
 - 默认费率是假设值：佣金万分之3且最低5元、卖出印花税万分之5、买卖滑点各万分之5；请按实际账户费率覆盖参数。
-- 这是{period_name}的研究模拟；除事先指定的1%参考规则外，其他阈值不得用于回看挑选策略。
+- 这是{period_name}的研究模拟；{rule_limitation}
 - 收益为原始价格收益，未包含现金分红总回报。
 - 涨跌停根据日线OHLC、昨收盘和板块涨跌幅近似推断一字板；没有交易所权威涨跌停状态、集合竞价队列或逐笔成交，仍可能高估成交能力。
 - 期末持仓按最后可见收盘价估值，未额外模拟期末强制平仓成本。
-- 当前 ColProj 预测统计尚未确认稳定买入优势，报告不是实盘收益预测。
+- {conclusion}
 """
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     Path(report_path).write_text(text, encoding="utf-8")

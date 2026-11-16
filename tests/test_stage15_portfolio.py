@@ -13,11 +13,39 @@ from kline_retrieval.stage15_portfolio import (  # noqa: E402
     _is_limit_up,
     _floor_lot,
     _mark_price_at_open,
+    build_equal_weight_benchmark,
     simulate_portfolio,
 )
 
 
 class Stage15PortfolioTests(unittest.TestCase):
+    def test_equal_weight_benchmark_uses_calendar_and_full_pool(self) -> None:
+        signal = date(2024, 1, 5)
+        entry = date(2024, 1, 8)
+        exit_date = date(2024, 1, 12)
+        benchmark = build_equal_weight_benchmark(
+            {
+                signal: [
+                    {
+                        "symbol": "000001",
+                        "entry_date": entry,
+                        "exit_date": exit_date,
+                        "predicted_return": -0.02,
+                        "signal_strength": None,
+                    }
+                ]
+            },
+            ("000001", "000002"),
+        )
+
+        self.assertEqual(
+            [row["symbol"] for row in benchmark[signal]],
+            ["000001", "000002"],
+        )
+        self.assertTrue(
+            all(row["predicted_return"] == 1.0 for row in benchmark[signal])
+        )
+
     def test_weekly_simulation_applies_lot_size_costs_and_cash_weight_cap(self) -> None:
         signal = date(2024, 1, 5)
         entry = date(2024, 1, 8)
