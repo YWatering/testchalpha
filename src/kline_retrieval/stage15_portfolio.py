@@ -93,6 +93,16 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("research/stage15/COLPROJ_PORTFOLIO_RESULTS.md"),
     )
+    parser.add_argument(
+        "--thresholds-output",
+        type=Path,
+        default=Path("research/stage15/colproj_portfolio_thresholds.csv"),
+    )
+    parser.add_argument(
+        "--evaluation-period",
+        choices=("validation", "out-of-sample"),
+        default="validation",
+    )
     return parser
 
 
@@ -152,7 +162,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         args.trades_output,
         args.manifest_output,
         args.report_output,
+        args.thresholds_output,
         threshold_grid=grid,
+        evaluation_period=args.evaluation_period,
     )
     print(f"weekly_periods: {len(result['weekly'])}")
     print(f"trade_count: {len(result['trades'])}")
@@ -170,11 +182,13 @@ def load_predictions(
         for row in csv.DictReader(handle):
             if row.get("status") != "ok":
                 continue
+            if row.get("actual_status") not in (None, "", "tradable"):
+                continue
             signal_date = date.fromisoformat(str(row["signal_date"]))
             if not date.fromisoformat(start_date) <= signal_date <= date.fromisoformat(end_date):
                 continue
             predicted = row.get("predicted_return")
-            if predicted in (None, ""):
+            if predicted in (None, "") or not row.get("entry_date") or not row.get("exit_date"):
                 continue
             output.setdefault(signal_date, []).append(
                 {
@@ -428,18 +442,23 @@ def write_result(
     trades_path: str | Path,
     manifest_path: str | Path,
     report_path: str | Path,
+    thresholds_path: str | Path,
     *,
     threshold_grid: Sequence[dict[str, object]],
+    evaluation_period: str = "validation",
 ) -> None:
     _write_rows(weekly_path, result["weekly"])
     _write_rows(trades_path, [asdict(trade) for trade in result["trades"]])
-    threshold_path = Path(report_path).with_name("colproj_portfolio_thresholds.csv")
-    _write_rows(threshold_path, threshold_grid)
+    _write_rows(thresholds_path, threshold_grid)
     manifest = {"schema_version": "stage15-portfolio-v1", "parameters": result["parameters"], "metrics": result["metrics"], "weekly_count": len(result["weekly"]), "trade_count": len(result["trades"]), "threshold_grid": list(threshold_grid), "execution_price_basis": "raw_open_and_raw_close", "limitations": ["收益为价格收益，未包含现金分红总回报。", "涨跌停状态根据日线OHLC、昨收盘和板块比例保守推断，数据库没有交易所原始涨跌停状态字段。", "期末持仓按最后可见收盘价估值，未额外模拟期末强制平仓成本。", "结果是研究模拟，不是实盘建议。"]}
     output = Path(manifest_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8")
     metrics = result["metrics"]
+    period_name = "样本外测试" if evaluation_period == "out-of-sample" else "验证期"
+    weekly_name = Path(weekly_path).name
+    trades_name = Path(trades_path).name
+    thresholds_name = Path(thresholds_path).name
     text = f"""# 阶段十五：ColProj周频组合模拟
 
 ## 模拟口径
@@ -469,9 +488,9 @@ def write_result(
 | 累计换手率 | {metrics['total_turnover']:.2%} |
 | 交易成本 | {metrics['total_transaction_cost']:.2f} |
 
-逐周结果见 `colproj_portfolio_weekly.csv`，逐笔交易见 `colproj_portfolio_trades.csv`。涨跌停阻断和缺失行情不会被静默当作已成交，而会在逐笔交易文件中记录原因。
+逐周结果见 `{weekly_name}`，逐笔交易见 `{trades_name}`。涨跌停阻断和缺失行情不会被静默当作已成交，而会在逐笔交易文件中记录原因。
 
-## 验证期阈值敏感性
+## {period_name}阈值敏感性
 
 | 预测收益阈值 | 入选信号数 | 累计收益 | 最大回撤 | Sharpe | 交易成本 |
 | ---: | ---: | ---: | ---: | ---: | ---: |
@@ -487,16 +506,16 @@ def write_result(
         for row in threshold_grid
     ) + f"""
 
-阈值网格仅作为同一验证期上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `colproj_portfolio_thresholds.csv`。
+阈值网格仅作为同一{period_name}上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `{thresholds_name}`。
 
 ## 限制
 
 - 默认费率是假设值：佣金万分之3且最低5元、卖出印花税万分之5、买卖滑点各万分之5；请按实际账户费率覆盖参数。
-- 这是2024验证期内的描述性模拟，不是最终样本外测试；阈值表现不得用于直接选策略。
+- 这是{period_name}的研究模拟；除事先指定的1%参考规则外，其他阈值不得用于回看挑选策略。
 - 收益为原始价格收益，未包含现金分红总回报。
 - 涨跌停根据日线OHLC、昨收盘和板块涨跌幅近似推断一字板；没有交易所权威涨跌停状态、集合竞价队列或逐笔成交，仍可能高估成交能力。
 - 期末持仓按最后可见收盘价估值，未额外模拟期末强制平仓成本。
-- 当前 ColProj 验证期尚未确认稳定买入优势，报告不是实盘收益预测。
+- 当前 ColProj 预测统计尚未确认稳定买入优势，报告不是实盘收益预测。
 """
     Path(report_path).parent.mkdir(parents=True, exist_ok=True)
     Path(report_path).write_text(text, encoding="utf-8")

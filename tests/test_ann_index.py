@@ -10,11 +10,20 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from kline_retrieval.ann_index import (  # noqa: E402
     _batch_cosine_distances,
+    _group_top_candidate_ids,
     _select_temporally_eligible_candidates,
 )
 
 
 class ANNIndexTests(unittest.TestCase):
+    def test_group_top_candidate_ids_preserves_global_budget(self) -> None:
+        selected = _group_top_candidate_ids(
+            [(0.99, 1, 10), (0.98, 0, 20), (0.97, 1, 11)],
+            2,
+        )
+
+        self.assertEqual(selected, {1: {10}, 0: {20}})
+
     def test_batch_cosine_distances_matches_cosine_definition(self) -> None:
         query = np.asarray((1.0, 0.0, 0.0), dtype=np.float32)
         candidates = np.asarray(

@@ -2,7 +2,7 @@
 
 ## 当前阶段
 
-阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 已完成双模型 ANN 分片、综合索引、隔离预计算 worker 和 API 物化缓存命中，当前暂缓全市场100%物化。阶段15正在进行：固定50只股票研究池、145个周度信号、7,250条交易标签及2024年2,550条ColProj预测已完成；预测验证未确认稳定买入优势。已完成加入假设费用、整手限制和日线推断一字板阻断的首版组合模拟，但真实公司行为回报和全部开盘成交状态尚未核验，因此只作研究试点。后续需冻结交易规则开展样本外测试并加入CNN公平对照。收益率字段语义与异常缩放记录的人工复核仍待完成。
+阶段 0 至阶段 9 已完成。阶段 10-A/B/C 已完成：P1 股票下拉框直接加载本地数据库中的全部 5,428 只股票代码和名称；28 个 ColProj 分片覆盖 5,164 只具备有效样本的股票和 6,862,102 个样本，阶段 10-D 性能与随机抽样验收仍在进行。阶段 11 CNN 原型已完成。阶段 12 的全市场索引主目标已完成：28 个 CNN 分片覆盖 5,428 只股票和 6,862,102 个样本，API 和页面支持 ColProj/CNN 主动切换。阶段 13 已将正式行情库和两种全市场索引切换到收益率重建价格口径；旧索引已按分片校验后替换。阶段 14 已完成双模型 ANN 分片、综合索引、隔离预计算 worker 和 API 物化缓存命中，当前暂缓全市场100%物化。阶段15的ColProj主链路已完成：固定50只股票研究池、145个周度标签、2024验证期预测、截至2024年底训练码本的独立OOS索引，以及2025—2026共4,700条样本外预测。4,633条可评估记录的方向准确率为49.58%、Pearson相关为0.0015，未确认稳定预测优势；固定1%参考规则组合累计收益18.92%，但尚未加入固定50只等权和宽基基准，不能作信号归因。后续仍需复核公司行为与成交限制，并完成CNN公平对照。收益率字段语义与异常缩放记录的人工复核仍待完成。
 
 阶段 0 交付内容：
 
@@ -348,6 +348,25 @@ KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
 本次 ColProj 验证期 2,550 条预测已全部完成。完整结果见 [验证期报告](research/stage15/COLPROJ_VALIDATION_RESULTS.md)，明细见 [预测CSV](research/stage15/colproj_validation_predictions.csv) 和 [Top-20匹配CSV](research/stage15/colproj_validation_matches.csv)。方向准确率约48.75%，预测与实际收益的 Pearson 相关约-0.036，当前阈值网格没有显示足以确认的稳定买入优势；阶段十五不会据此宣称策略有效，也不会直接用于实盘。
 
 阶段十五的股票池、标签、ColProj预测和组合模拟已汇总为[阶段十五综合报告](research/stage15/阶段十五综合报告.md)。
+
+严格样本外批次使用只由2024-12-31及以前特征训练码本的独立ANN索引：
+
+```bash
+.venv/bin/kline-ann-index build-temporal-composite \
+  --source-manifest data/processed/colproj_ann_stage14.json \
+  --output-manifest data/processed/colproj_ann_stage15_oos.json \
+  --training-end-date 2024-12-31
+
+.venv/bin/kline-stage15-weekly predict-colproj-batch \
+  --ann-manifest data/processed/colproj_ann_stage15_oos.json \
+  --start-date 2025-01-01 --end-date 2026-10-23 --all \
+  --store data/processed/stage15_colproj_oos_predictions.sqlite3 \
+  --predictions-output research/stage15/colproj_oos_predictions.csv \
+  --matches-output research/stage15/colproj_oos_matches.csv \
+  --manifest-output research/stage15/colproj_oos_manifest.json
+```
+
+4,700条任务已全部完成，其中4,689条成功预测、4,633条具有可评估真实收益。预测报告见[OOS预测结果](research/stage15/COLPROJ_OOS_RESULTS.md)，固定1%参考组合见[OOS组合结果](research/stage15/COLPROJ_OOS_PORTFOLIO_RESULTS.md)。
 
 验证期组合交易模拟命令（默认使用预测收益阈值1%作为待评估情景，不代表已选定的有效阈值）：
 

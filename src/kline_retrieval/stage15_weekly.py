@@ -155,6 +155,11 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("research/stage15/colproj_validation_thresholds.csv"),
     )
+    analysis.add_argument(
+        "--allow-incomplete-labels",
+        action="store_true",
+        help="允许数据截止日附近的预测尚无未来收益，只分析已实现标签",
+    )
     return parser
 
 
@@ -244,7 +249,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.command == "analyze-colproj-validation":
-            result = analyze_colproj_validation(args.store, args.run_key)
+            result = analyze_colproj_validation(
+                args.store,
+                args.run_key,
+                allow_incomplete_labels=args.allow_incomplete_labels,
+            )
             write_validation_analysis(
                 result,
                 report_path=args.report_output,
@@ -552,6 +561,9 @@ def run_colproj_pilot(
     max_queries: int | None = None,
     selected_symbols: Sequence[str] | None = None,
     config: ProjectConfig = DEFAULT_CONFIG,
+    completed_keys: set[tuple[str, date]] | None = None,
+    on_query: Callable[[dict[str, object], list[dict[str, object]]], None] | None = None,
+    progress: bool = False,
 ) -> dict[str, object]:
     if (
         top_k <= 0
@@ -594,11 +606,31 @@ def run_colproj_pilot(
     predictions: list[dict[str, object]] = []
     match_rows: list[dict[str, object]] = []
     label_cache: dict[tuple[str, date], TradableLabel] = {}
+    previously_completed = completed_keys or set()
     processed = 0
+
+    def record_query(
+        prediction: dict[str, object],
+        query_matches: list[dict[str, object]],
+    ) -> None:
+        predictions.append(prediction)
+        match_rows.extend(query_matches)
+        if on_query is not None:
+            on_query(prediction, query_matches)
+        if progress:
+            print(
+                f"progress: new={len(predictions)} symbol={prediction['symbol']} "
+                f"date={prediction['signal_date']} status={prediction['status']} "
+                f"ann_ms={prediction.get('ann_ms', '')}",
+                flush=True,
+            )
     try:
         with sqlite3.connect(uri, uri=True, timeout=60) as connection:
             for schedule in query_schedule:
                 for symbol in symbols:
+                    query_key = (symbol, schedule.signal_date)
+                    if query_key in previously_completed:
+                        continue
                     if max_queries is not None and processed >= max_queries:
                         break
                     processed += 1
@@ -610,8 +642,9 @@ def run_colproj_pilot(
                             config=config,
                         )
                     except MarketDataError as exc:
-                        predictions.append(
-                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc))
+                        record_query(
+                            _failed_prediction(symbol, schedule, "query_unavailable", str(exc)),
+                            [],
                         )
                         continue
                     matches, diagnostics = ann_index.search(
@@ -648,14 +681,15 @@ def run_colproj_pilot(
                         top_k=top_k,
                     )
                     if len(eligible) < minimum_matches:
-                        predictions.append(
+                        record_query(
                             {
                                 **_prediction_identity(symbol, schedule),
                                 "status": "insufficient_eligible_matches",
                                 "error": "",
                                 "eligible_match_count": len(eligible),
                                 **diagnostics,
-                            }
+                            },
+                            [],
                         )
                         continue
                     selected_matches = tuple(item[0] for item in eligible)
@@ -671,29 +705,28 @@ def run_colproj_pilot(
                         [(symbol, schedule.signal_date)],
                         schedule_by_date,
                     ).get((symbol, schedule.signal_date))
-                    predictions.append(
-                        {
-                            **_prediction_identity(symbol, schedule),
-                            "status": "ok",
-                            "error": "",
-                            "eligible_match_count": len(eligible),
-                            "predicted_return": statistics.weighted_mean,
-                            "weighted_std": statistics.weighted_std,
-                            "signal_strength": statistics.signal_strength,
-                            "positive_probability": statistics.weighted_win_rate,
-                            "effective_sample_size": statistics.effective_sample_size,
-                            "standard_error": statistics.standard_error,
-                            "lower_bound": statistics.lower_bound,
-                            "upper_bound": statistics.upper_bound,
-                            "minimum_distance": min(item.distance for item in selected_matches),
-                            "maximum_distance": max(item.distance for item in selected_matches),
-                            "actual_status": actual.status if actual else "missing_label",
-                            "actual_gross_return": actual.gross_return if actual else None,
-                            **diagnostics,
-                        }
-                    )
+                    prediction = {
+                        **_prediction_identity(symbol, schedule),
+                        "status": "ok",
+                        "error": "",
+                        "eligible_match_count": len(eligible),
+                        "predicted_return": statistics.weighted_mean,
+                        "weighted_std": statistics.weighted_std,
+                        "signal_strength": statistics.signal_strength,
+                        "positive_probability": statistics.weighted_win_rate,
+                        "effective_sample_size": statistics.effective_sample_size,
+                        "standard_error": statistics.standard_error,
+                        "lower_bound": statistics.lower_bound,
+                        "upper_bound": statistics.upper_bound,
+                        "minimum_distance": min(item.distance for item in selected_matches),
+                        "maximum_distance": max(item.distance for item in selected_matches),
+                        "actual_status": actual.status if actual else "missing_label",
+                        "actual_gross_return": actual.gross_return if actual else None,
+                        **diagnostics,
+                    }
+                    current_match_rows: list[dict[str, object]] = []
                     for match, label, weight in zip(selected_matches, selected_labels, weights):
-                        match_rows.append(
+                        current_match_rows.append(
                             {
                                 "query_symbol": symbol,
                                 "query_date": schedule.signal_date.isoformat(),
@@ -709,6 +742,7 @@ def run_colproj_pilot(
                                 "candidate_gross_return": label.gross_return,
                             }
                         )
+                    record_query(prediction, current_match_rows)
                 if max_queries is not None and processed >= max_queries:
                     break
     finally:
@@ -873,6 +907,8 @@ def run_colproj_batch(
 def analyze_colproj_validation(
     store_path: str | Path,
     run_key: str,
+    *,
+    allow_incomplete_labels: bool = False,
 ) -> dict[str, object]:
     store = Stage15PredictionStore(store_path)
     run = store.run_status(run_key)
@@ -888,8 +924,19 @@ def analyze_colproj_validation(
         and row.get("predicted_return") is not None
         and row.get("actual_gross_return") is not None
     ]
-    if len(rows) != run["target_count"]:
+    if not rows:
+        raise ValueError("没有可用于评估的已实现真实收益")
+    if not allow_incomplete_labels and len(rows) != run["target_count"]:
         raise ValueError("验证预测存在失败或真实收益缺失，不能计算完整报告")
+
+    all_rows = store.load_predictions(run_key)
+    status_counts: dict[str, int] = {}
+    actual_status_counts: dict[str, int] = {}
+    for row in all_rows:
+        status = str(row.get("status") or "missing")
+        actual_status = str(row.get("actual_status") or "missing")
+        status_counts[status] = status_counts.get(status, 0) + 1
+        actual_status_counts[actual_status] = actual_status_counts.get(actual_status, 0) + 1
 
     predicted = [float(row["predicted_return"]) for row in rows]
     actual = [float(row["actual_gross_return"]) for row in rows]
@@ -937,8 +984,20 @@ def analyze_colproj_validation(
         "run": run,
         "summary": summary,
         "thresholds": thresholds,
+        "coverage": {
+            "target_count": run["target_count"],
+            "evaluated_count": len(rows),
+            "excluded_count": len(all_rows) - len(rows),
+            "prediction_status_counts": status_counts,
+            "actual_status_counts": actual_status_counts,
+        },
+        "is_out_of_sample": "train-through-" in str(run["index_version"]),
         "limitations": [
-            "这是验证期内的阈值分析，不是最终样本外测试结果。",
+            (
+                "这是使用固定1%参考规则的样本外评估；其他阈值只作预先列出的敏感性诊断，不能用于回看挑选。"
+                if "train-through-" in str(run["index_version"])
+                else "这是验证期内的阈值分析，不是最终样本外测试结果。"
+            ),
             "收益是未扣成本的原始价格收益，不包含完整公司行为总回报。",
             "阈值区间互相重叠，仅作描述性对照，不是相互独立的实验。",
             "股票—周样本存在横截面和时间相关性，有效样本量低于记录条数。",
@@ -1044,6 +1103,8 @@ def write_validation_analysis(
     thresholds = list(result["thresholds"])
     _write_csv(thresholds_path, thresholds)
     summary = result["summary"]
+    coverage = result["coverage"]
+    period_name = "样本外测试" if result["is_out_of_sample"] else "验证期"
     limitations = "\n".join(f"- {item}" for item in result["limitations"])
     threshold_lines = [
         "| 预测收益阈值 | 稳定性下限 | 样本数 | 预测均值 | 实际毛收益均值 | 实际收益中位数 | 胜率 |",
@@ -1065,15 +1126,16 @@ def write_validation_analysis(
                 win=_format_percent(item["realized_win_rate"]),
             )
         )
-    text = f"""# 阶段十五：ColProj验证期预测结果
+    text = f"""# 阶段十五：ColProj{period_name}预测结果
 
 ## 样本与版本
 
-- 验证区间：`{result['run']['scope']['start_date']}` 至 `{result['run']['scope']['end_date']}`。
-- 股票—周样本数：{summary['sample_count']}；周数：{summary['week_count']}。
+- 测试区间：`{result['run']['scope']['start_date']}` 至 `{result['run']['scope']['end_date']}`。
+- 预测任务：{coverage['target_count']}条；成功预测：{coverage['prediction_status_counts'].get('ok', 0)}条；已实现且可评估：{summary['sample_count']}条；排除：{coverage['excluded_count']}条。
+- 已评估周数：{summary['week_count']}。
 - 模型：ColProj；索引版本：`{result['run']['index_version']}`。
 - 预测目标：未来5个市场交易日，下一交易日原始开盘买入至第5日原始收盘。
-- 预测参数和数据快照见 `colproj_validation_manifest.json`。
+- 索引码本训练截止日由索引版本中的`train-through`日期标识；预测参数和数据快照见对应运行清单。
 
 ## 整体预测表现
 
@@ -1089,7 +1151,7 @@ def write_validation_analysis(
 | 周均 Pearson 相关 | {summary['weekly_mean_pearson_correlation']:.4f} |
 | 周均 Spearman 相关 | {summary['weekly_mean_spearman_correlation']:.4f} |
 
-方向准确率接近随机基线、相关性若接近零或为负，表示当前 ColProj 信号在验证期没有显示稳定的方向/排序能力。阈值收益只作验证期筛选，不代表未来表现。
+方向准确率接近随机基线、相关性若接近零或为负，表示当前 ColProj 信号在{period_name}没有显示稳定的方向/排序能力。阈值收益只作{period_name}诊断，不代表未来表现。
 
 ## 收益阈值与稳定性对照
 
@@ -1101,7 +1163,7 @@ def write_validation_analysis(
 
 {limitations}
 
-当前阶段没有确认一个可用于实盘的买入阈值。若验证期阈值表现不稳定或扣费后优势消失，应报告策略未通过，而不是继续挑选更高阈值直到出现较好历史结果。
+当前阶段没有确认一个可用于实盘的买入阈值。若{period_name}阈值表现不稳定或扣费后优势消失，应报告策略未通过，而不是继续挑选更高阈值直到出现较好历史结果。
 """
     output = Path(report_path)
     output.parent.mkdir(parents=True, exist_ok=True)

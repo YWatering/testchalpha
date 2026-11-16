@@ -5,9 +5,10 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import sqlite3
 from urllib.parse import quote
-from datetime import date
+from datetime import date, datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Sequence
@@ -50,6 +51,9 @@ class MultiScaleANNIndex:
         self.checkpoint_sha256 = manifest.get("checkpoint_sha256")
         self.candidate_k = int(candidate_k)
         self.nprobe = int(nprobe)
+        self._faiss = faiss
+        self._eligible_row_id_cache: tuple[frozenset[date], tuple[np.ndarray, ...]] | None = None
+        self._eligible_search_params_cache: tuple[frozenset[date], tuple[object, ...]] | None = None
         self._shards: list[dict[str, object]] = []
         symbols: set[str] = set()
         sample_count = 0
@@ -132,13 +136,26 @@ class MultiScaleANNIndex:
             and week_weight == 1.0
             and all("combined" in shard["indexes"] for shard in self._shards)
         )
+        eligible_row_ids = (
+            self._eligible_row_ids(eligible_candidate_dates)
+            if eligible_candidate_dates is not None
+            else None
+        )
+        eligible_search_params = (
+            self._eligible_search_params(eligible_row_ids)
+            if eligible_row_ids is not None
+            else None
+        )
         if use_combined:
             combined_started = perf_counter()
             combined_query = np.concatenate(query_arrays) / np.sqrt(3.0)
             approximate: list[tuple[float, int, int]] = []
             for shard_index, shard in enumerate(self._shards):
-                scores, ids = shard["indexes"]["combined"].search(
-                    combined_query.reshape(1, -1), self.candidate_k
+                scores, ids = _index_search(
+                    shard["indexes"]["combined"],
+                    combined_query.reshape(1, -1),
+                    self.candidate_k,
+                    eligible_search_params[shard_index] if eligible_search_params is not None else None,
                 )
                 approximate.extend(
                     (float(score), shard_index, int(rowid))
@@ -146,45 +163,49 @@ class MultiScaleANNIndex:
                     if rowid >= 0
                 )
             approximate.sort(key=lambda item: (-item[0], item[1], item[2]))
-            candidate_metadata: dict[tuple[int, int], tuple[str, str]] = {}
-            ids_by_shard: dict[int, list[int]] = {}
-            for _, shard_index, rowid in approximate:
-                ids_by_shard.setdefault(shard_index, []).append(rowid)
-            for shard_index, rowids in ids_by_shard.items():
-                shard = self._shards[shard_index]
-                connection = shard["connection"]
-                version_id = shard["version_id"]
-                for start in range(0, len(rowids), 900):
-                    batch = rowids[start : start + 900]
-                    load_started = perf_counter()
-                    placeholders = ",".join("?" for _ in batch)
-                    rows = connection.execute(
-                        f"SELECT rowid, symbol, date FROM samples "
-                        f"WHERE version_id=? AND rowid IN ({placeholders})",
-                        (version_id, *batch),
-                    ).fetchall()
-                    metadata_load_ms += (perf_counter() - load_started) * 1000
-                    prefilter_count += len(rows)
-                    candidate_metadata.update(
-                        ((shard_index, int(rowid)), (symbol, date_text))
-                        for rowid, symbol, date_text in rows
-                    )
             global_budget_multiplier = 6 if eligible_candidate_dates is not None else len(self._shards)
             global_budget = min(
                 len(approximate),
                 max(self.candidate_k * 3, top_k * global_budget_multiplier),
             )
-            combined_candidate_ids = _select_temporally_eligible_candidates(
-                approximate,
-                candidate_metadata,
-                query_symbol=query.symbol,
-                query_date=query.date,
-                query_positions=query_positions,
-                query_index=query_index,
-                embargo_trading_days=embargo_trading_days,
-                eligible_candidate_dates=eligible_candidate_dates,
-                budget=global_budget,
-            )
+            if eligible_candidate_dates is not None and embargo_trading_days == 0:
+                combined_candidate_ids = _group_top_candidate_ids(approximate, global_budget)
+                prefilter_count = len(approximate)
+            else:
+                candidate_metadata: dict[tuple[int, int], tuple[str, str]] = {}
+                ids_by_shard: dict[int, list[int]] = {}
+                for _, shard_index, rowid in approximate:
+                    ids_by_shard.setdefault(shard_index, []).append(rowid)
+                for shard_index, rowids in ids_by_shard.items():
+                    shard = self._shards[shard_index]
+                    connection = shard["connection"]
+                    version_id = shard["version_id"]
+                    for start in range(0, len(rowids), 900):
+                        batch = rowids[start : start + 900]
+                        load_started = perf_counter()
+                        placeholders = ",".join("?" for _ in batch)
+                        rows = connection.execute(
+                            f"SELECT rowid, symbol, date FROM samples "
+                            f"WHERE version_id=? AND rowid IN ({placeholders})",
+                            (version_id, *batch),
+                        ).fetchall()
+                        metadata_load_ms += (perf_counter() - load_started) * 1000
+                        prefilter_count += len(rows)
+                        candidate_metadata.update(
+                            ((shard_index, int(rowid)), (symbol, date_text))
+                            for rowid, symbol, date_text in rows
+                        )
+                combined_candidate_ids = _select_temporally_eligible_candidates(
+                    approximate,
+                    candidate_metadata,
+                    query_symbol=query.symbol,
+                    query_date=query.date,
+                    query_positions=query_positions,
+                    query_index=query_index,
+                    embargo_trading_days=embargo_trading_days,
+                    eligible_candidate_dates=eligible_candidate_dates,
+                    budget=global_budget,
+                )
             ann_search_ms += (perf_counter() - combined_started) * 1000
 
         for shard_index, shard in enumerate(self._shards):
@@ -195,15 +216,17 @@ class MultiScaleANNIndex:
             else:
                 candidate_ids: set[int] = set()
                 for scale, vector in zip(SCALES, query_vectors):
-                    _, ids = indexes[scale].search(
-                        np.asarray(vector, dtype=np.float32).reshape(1, -1), self.candidate_k
+                    _, ids = _index_search(
+                        indexes[scale],
+                        np.asarray(vector, dtype=np.float32).reshape(1, -1),
+                        self.candidate_k,
+                        eligible_search_params[shard_index] if eligible_search_params is not None else None,
                     )
                     candidate_ids.update(int(item) for item in ids[0] if item >= 0)
             if combined_candidate_ids is None:
                 ann_search_ms += (perf_counter() - shard_search_started) * 1000
             if not candidate_ids:
                 continue
-            source = shard["source"]
             version_id = shard["version_id"]
             ordered_ids = sorted(candidate_ids)
             shard_candidates: list[tuple[float, str, str, float, float, float, SampleEmbeddings]] = []
@@ -315,6 +338,56 @@ class MultiScaleANNIndex:
             "ann_rerank_ms": round(rerank_ms, 3),
         }
 
+    def _eligible_row_ids(
+        self, eligible_candidate_dates: set[date]
+    ) -> tuple[np.ndarray, ...]:
+        key = frozenset(eligible_candidate_dates)
+        if self._eligible_row_id_cache is not None and self._eligible_row_id_cache[0] == key:
+            return self._eligible_row_id_cache[1]
+        if not key:
+            row_ids = tuple(np.empty(0, dtype=np.int64) for _ in self._shards)
+        else:
+            dates = tuple(sorted(key))
+            placeholders = ",".join("?" for _ in dates)
+            row_ids = tuple(
+                np.fromiter(
+                    (
+                        int(row[0])
+                        for row in shard["connection"].execute(
+                            f"SELECT rowid FROM samples WHERE version_id=? AND date IN ({placeholders})",
+                            (shard["version_id"], *(item.isoformat() for item in dates)),
+                        )
+                    ),
+                    dtype=np.int64,
+                )
+                for shard in self._shards
+            )
+        self._eligible_row_id_cache = (key, row_ids)
+        return row_ids
+
+    def _eligible_search_params(self, row_ids: tuple[np.ndarray, ...]) -> tuple[object, ...]:
+        key = self._eligible_row_id_cache[0] if self._eligible_row_id_cache else frozenset()
+        if (
+            self._eligible_search_params_cache is not None
+            and self._eligible_search_params_cache[0] == key
+        ):
+            return self._eligible_search_params_cache[1]
+        params = []
+        for index_number, shard in enumerate(self._shards):
+            search_params = self._faiss.SearchParametersIVF()
+            search_params.nprobe = self.nprobe
+            search_params.sel = self._faiss.IDSelectorBatch(row_ids[index_number])
+            params.append(search_params)
+        result = tuple(params)
+        self._eligible_search_params_cache = (key, result)
+        return result
+
+
+def _index_search(index: object, query: np.ndarray, candidate_k: int, params: object | None):
+    if params is None:
+        return index.search(query, candidate_k)
+    return index.search(query, candidate_k, params=params)
+
 
 def _resolve_manifest_path(manifest_path: Path, value: str) -> Path:
     path = Path(value)
@@ -396,6 +469,16 @@ def _select_temporally_eligible_candidates(
     return selected
 
 
+def _group_top_candidate_ids(
+    approximate: Sequence[tuple[float, int, int]],
+    budget: int,
+) -> dict[int, set[int]]:
+    selected: dict[int, set[int]] = {}
+    for _, shard_index, rowid in approximate[:budget]:
+        selected.setdefault(shard_index, set()).add(rowid)
+    return selected
+
+
 def build_faiss_shard(
     source_path: str | Path,
     output_dir: str | Path,
@@ -403,6 +486,7 @@ def build_faiss_shard(
     training_rows: int = 100_000,
     nlist: int | None = None,
     batch_size: int = 16_384,
+    training_end_date: str | None = None,
 ) -> dict[str, object]:
     """Build three scale indexes plus a default-weight combined IVF-PQ index."""
 
@@ -421,8 +505,16 @@ def build_faiss_shard(
         if version is None:
             raise ValueError(f"索引分片没有 ready 版本: {source}")
         version_id, source_hash, model, dimension, row_count = version
-        selected_nlist = nlist or min(1024, max(64, int(math.sqrt(row_count))))
-        selected_nlist = min(selected_nlist, max(1, row_count // 39))
+        training_filter = " AND date<=?" if training_end_date else ""
+        training_parameters = (version_id, training_end_date) if training_end_date else (version_id,)
+        training_population = int(connection.execute(
+            f"SELECT count(*) FROM samples WHERE version_id=?{training_filter}",
+            training_parameters,
+        ).fetchone()[0])
+        if training_population < 1:
+            raise ValueError("训练截止日期之前没有可用于训练 IVF 索引的样本")
+        selected_nlist = nlist or min(1024, max(64, int(math.sqrt(training_population))))
+        selected_nlist = min(selected_nlist, max(1, training_population // 39))
         if selected_nlist < 1:
             raise ValueError("样本量不足以训练 IVF 索引")
         configuration = {
@@ -433,6 +525,8 @@ def build_faiss_shard(
             "model": model,
             "dimension": int(dimension),
             "sample_count": int(row_count),
+            "training_end_date": training_end_date,
+            "training_sample_count": training_population,
             "nlist": selected_nlist,
             "pq_m": 16 if int(dimension) % 16 == 0 else 8,
             "pq_bits": 8,
@@ -443,15 +537,14 @@ def build_faiss_shard(
 
         result: dict[str, object] = {**configuration, "indexes": {}}
         for scale in SCALES:
-            field = f"s.{scale}"
+            train_count = min(training_population, max(training_rows, selected_nlist * 39))
             cursor = connection.execute(
-                f"SELECT rowid, {scale} FROM samples AS s WHERE version_id=? ORDER BY rowid",
-                (version_id,),
+                f"SELECT rowid, {scale} FROM samples WHERE version_id=?{training_filter} ORDER BY rowid",
+                training_parameters,
             )
-            train_count = min(int(row_count), max(training_rows, selected_nlist * 39))
             train_values = np.empty((train_count, int(dimension)), dtype=np.float32)
             seen = 0
-            train_stride = max(1, int(row_count) // train_count)
+            train_stride = max(1, training_population // train_count)
             for row_index, (_, blob) in enumerate(cursor):
                 if row_index % train_stride == 0 and seen < train_count:
                     train_values[seen] = np.frombuffer(blob, dtype="<f4")
@@ -507,6 +600,8 @@ def build_faiss_shard(
             pq_bits=int(configuration["pq_bits"]),
             training_rows=training_rows,
             batch_size=batch_size,
+            training_end_date=training_end_date,
+            training_population=training_population,
         )
         configuration["combined_dimension"] = int(dimension) * len(SCALES)
         configuration["combined_weights"] = [1.0, 1.0, 1.0]
@@ -561,6 +656,8 @@ def build_combined_faiss_shard(
             pq_bits=int(configuration.get("pq_bits", 8)),
             training_rows=training_rows,
             batch_size=batch_size,
+            training_end_date=configuration.get("training_end_date"),
+            training_population=int(configuration.get("training_sample_count", row_count)),
         )
     configuration["combined_dimension"] = int(dimension) * len(SCALES)
     configuration["combined_weights"] = [1.0, 1.0, 1.0]
@@ -586,18 +683,23 @@ def _build_combined_faiss_index(
     pq_bits: int,
     training_rows: int,
     batch_size: int,
+    training_end_date: str | None = None,
+    training_population: int | None = None,
 ) -> dict[str, object]:
     import faiss
 
     combined_dimension = dimension * len(SCALES)
     combined_m = 16 if combined_dimension % 16 == 0 else 8
-    combined_train_count = min(row_count, max(training_rows, selected_nlist * 39))
+    training_filter = " AND date<=?" if training_end_date else ""
+    training_parameters = (version_id, training_end_date) if training_end_date else (version_id,)
+    training_population = row_count if training_population is None else training_population
+    combined_train_count = min(training_population, max(training_rows, selected_nlist * 39))
     combined_train_values = np.empty((combined_train_count, combined_dimension), dtype=np.float32)
     combined_seen = 0
-    combined_stride = max(1, row_count // combined_train_count)
+    combined_stride = max(1, training_population // combined_train_count)
     cursor = connection.execute(
-        "SELECT rowid, monthly, weekly, daily FROM samples WHERE version_id=? ORDER BY rowid",
-        (version_id,),
+        f"SELECT rowid, monthly, weekly, daily FROM samples WHERE version_id=?{training_filter} ORDER BY rowid",
+        training_parameters,
     )
     for row_index, (_, monthly, weekly, daily) in enumerate(cursor):
         if row_index % combined_stride == 0 and combined_seen < combined_train_count:
@@ -642,6 +744,60 @@ def _build_combined_faiss_index(
     destination.mkdir(parents=True, exist_ok=True)
     faiss.write_index(combined_index, str(destination / "combined.faiss"))
     return {"vectors": added, "training_vectors": len(combined_train_values), "weights": [1.0, 1.0, 1.0]}
+
+
+def build_temporal_composite_index(
+    source_manifest_path: str | Path,
+    output_manifest_path: str | Path,
+    *,
+    training_end_date: str,
+    training_rows: int = 100_000,
+) -> dict[str, object]:
+    """Build or resume a composite index whose IVF-PQ codebooks use only earlier samples."""
+
+    source_manifest_path = Path(source_manifest_path)
+    output_manifest_path = Path(output_manifest_path)
+    source_manifest = json.loads(source_manifest_path.read_text(encoding="utf-8"))
+    if source_manifest.get("format") != "kline-ann-manifest-v1":
+        raise ValueError("ANN 清单格式不受支持")
+    output_manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    ann_root = output_manifest_path.parent / "stage15_oos_ann" / str(source_manifest["model"])
+    output_shards: list[dict[str, str]] = []
+    for shard_number, shard in enumerate(source_manifest["shards"], start=1):
+        source = _resolve_manifest_path(source_manifest_path, shard["source"])
+        ann_dir = ann_root / Path(shard["source"]).stem
+        shard_manifest_path = ann_dir / "manifest.json"
+        complete = all((ann_dir / f"{scale}.faiss").is_file() for scale in (*SCALES, "combined"))
+        if complete and shard_manifest_path.is_file():
+            current = json.loads(shard_manifest_path.read_text(encoding="utf-8"))
+            complete = (
+                current.get("source_hash") == source_manifest["source_hash"]
+                and current.get("training_end_date") == training_end_date
+            )
+        if not complete:
+            print(f"building temporal ANN shard {shard_number}/{len(source_manifest['shards'])}: {source.name}", flush=True)
+            build_faiss_shard(
+                source,
+                ann_dir,
+                training_rows=training_rows,
+                training_end_date=training_end_date,
+            )
+        output_shards.append({
+            "source": os.path.relpath(source, output_manifest_path.parent),
+            "ann": os.path.relpath(ann_dir, output_manifest_path.parent),
+        })
+    manifest = {
+        **{key: value for key, value in source_manifest.items() if key not in {"created_at_utc", "version_id", "shards"}},
+        "created_at_utc": datetime.now(timezone.utc).isoformat(),
+        "version_id": f"{source_manifest['version_id']}-train-through-{training_end_date}",
+        "training_end_date": training_end_date,
+        "training_policy": "ivf_pq_codebooks_fit_only_on_samples_on_or_before_training_end_date; all_vectors_indexed",
+        "shards": output_shards,
+    }
+    temporary_path = output_manifest_path.with_suffix(output_manifest_path.suffix + ".tmp")
+    temporary_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary_path.replace(output_manifest_path)
+    return {"manifest": str(output_manifest_path), "shard_count": len(output_shards), "training_end_date": training_end_date}
 
 
 def _concat_scales(monthly: bytes, weekly: bytes, daily: bytes) -> np.ndarray:
@@ -812,6 +968,12 @@ def build_parser() -> argparse.ArgumentParser:
     build.add_argument("--output", type=Path, required=True)
     build.add_argument("--training-rows", type=int, default=100_000)
     build.add_argument("--nlist", type=int)
+    build.add_argument("--training-end-date")
+    composite = subparsers.add_parser("build-temporal-composite")
+    composite.add_argument("--source-manifest", type=Path, required=True)
+    composite.add_argument("--output-manifest", type=Path, required=True)
+    composite.add_argument("--training-end-date", required=True)
+    composite.add_argument("--training-rows", type=int, default=100_000)
     combined = subparsers.add_parser("build-combined")
     combined.add_argument("--source", type=Path, required=True)
     combined.add_argument("--ann", type=Path, required=True)
@@ -833,7 +995,20 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.command == "build":
-        print(json.dumps(build_faiss_shard(args.source, args.output, training_rows=args.training_rows, nlist=args.nlist), indent=2))
+        print(json.dumps(build_faiss_shard(
+            args.source,
+            args.output,
+            training_rows=args.training_rows,
+            nlist=args.nlist,
+            training_end_date=args.training_end_date,
+        ), indent=2))
+    elif args.command == "build-temporal-composite":
+        print(json.dumps(build_temporal_composite_index(
+            args.source_manifest,
+            args.output_manifest,
+            training_end_date=args.training_end_date,
+            training_rows=args.training_rows,
+        ), indent=2))
     elif args.command == "build-combined":
         print(json.dumps(
             build_combined_faiss_shard(
