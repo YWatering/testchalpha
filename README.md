@@ -347,6 +347,8 @@ KLINE_RETRIEVAL_CACHE_PATH=data/processed/stage14_retrieval_cache.sqlite3 \
 
 本次 ColProj 验证期 2,550 条预测已全部完成。完整结果见 [验证期报告](research/stage15/COLPROJ_VALIDATION_RESULTS.md)，明细见 [预测CSV](research/stage15/colproj_validation_predictions.csv) 和 [Top-20匹配CSV](research/stage15/colproj_validation_matches.csv)。方向准确率约48.75%，预测与实际收益的 Pearson 相关约-0.036，当前阈值网格没有显示足以确认的稳定买入优势；阶段十五不会据此宣称策略有效，也不会直接用于实盘。
 
+阶段十五的股票池、标签、ColProj预测和组合模拟已汇总为[阶段十五综合报告](research/stage15/阶段十五综合报告.md)。
+
 验证期组合交易模拟命令（默认使用预测收益阈值1%作为待评估情景，不代表已选定的有效阈值）：
 
 ```bash
