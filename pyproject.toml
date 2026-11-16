@@ -30,6 +30,7 @@ kline-ann-search-worker = "kline_retrieval.ann_search_worker:main"
 kline-build-stage15-pool = "kline_retrieval.stage15_pool:main"
 kline-stage15-weekly = "kline_retrieval.stage15_weekly:main"
 kline-stage15-portfolio = "kline_retrieval.stage15_portfolio:main"
+kline-stage15-etf-benchmark = "kline_retrieval.stage15_etf_benchmark:main"
 
 [project.optional-dependencies]
 web = [

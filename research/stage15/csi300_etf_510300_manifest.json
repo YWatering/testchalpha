@@ -1,0 +1,15 @@
+{
+  "schema_version": "stage15-etf-snapshot-v1",
+  "symbol": "510300",
+  "name": "沪深300ETF",
+  "provider": "akshare",
+  "provider_version": "1.19.1",
+  "endpoint": "fund_etf_hist_sina",
+  "adjust": "raw",
+  "requested_start": "2024-12-01",
+  "requested_end": "2026-10-23",
+  "actual_start": "2024-12-02",
+  "actual_end": "2026-10-23",
+  "row_count": 458,
+  "sha256": "61ca8c91b98474fed4349b32e45c9d8c61cfb2975154a2686d1a67fd1a0c2e6a"
+}

@@ -1,0 +1,2 @@
+﻿signal_date,entry_date,symbol,action,quantity,price,notional,commission,stamp_duty,slippage,reason
+2025-01-03,2025-01-06,510300,buy,258500,3.8669325,999602.05125,299.880615375,0.0,499.55125000000004,executed

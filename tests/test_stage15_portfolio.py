@@ -83,6 +83,48 @@ class Stage15PortfolioTests(unittest.TestCase):
         self.assertAlmostEqual(result["metrics"]["final_value"], 100_000 + 900 * 11 - trade.notional - trade.commission)
         self.assertAlmostEqual(result["weekly"][0]["transaction_cost"], trade.commission + trade.slippage)
 
+    def test_single_asset_can_use_full_position_weight(self) -> None:
+        signal = date(2024, 1, 5)
+        entry = date(2024, 1, 8)
+        exit_date = date(2024, 1, 12)
+        bar = RawBar("510300", entry, 10, 10, 10, 10, 10)
+        result = simulate_portfolio(
+            {
+                signal: [
+                    {
+                        "symbol": "510300",
+                        "entry_date": entry,
+                        "exit_date": exit_date,
+                        "predicted_return": 1.0,
+                        "signal_strength": None,
+                    }
+                ]
+            },
+            {
+                ("510300", entry): bar,
+                ("510300", exit_date): RawBar(
+                    "510300", exit_date, 10, 10, 10, 10, 10
+                ),
+            },
+            {"510300": "ETF"},
+            (signal, entry, exit_date),
+            threshold=0,
+            min_signal_strength=None,
+            initial_capital=100_000,
+            costs=CostConfig(
+                commission_rate=0,
+                stamp_duty_rate=0,
+                slippage_rate=0,
+                minimum_commission=0,
+                lot_size=100,
+            ),
+            rebalance=False,
+            max_position_weight=1.0,
+        )
+
+        self.assertEqual(result["trades"][0].quantity, 10_000)
+        self.assertEqual(result["weekly"][0]["cash_end"], 0)
+
     def test_buy_and_hold_does_not_rebalance_after_initial_entry(self) -> None:
         first_signal = date(2024, 1, 5)
         first_entry = date(2024, 1, 8)

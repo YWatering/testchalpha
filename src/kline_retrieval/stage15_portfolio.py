@@ -73,6 +73,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slippage-rate", type=float, default=0.0005)
     parser.add_argument("--minimum-commission", type=float, default=5.0)
     parser.add_argument("--lot-size", type=int, default=100)
+    parser.add_argument("--max-position-weight", type=float, default=0.10)
     benchmark_group = parser.add_mutually_exclusive_group()
     benchmark_group.add_argument(
         "--benchmark-all-stocks",
@@ -121,6 +122,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     if args.initial_capital <= 0:
         raise ValueError("initial-capital 必须大于 0")
+    if not 0 < args.max_position_weight <= 1:
+        raise ValueError("max-position-weight 必须在 (0, 1] 区间")
     costs = CostConfig(
         commission_rate=args.commission_rate,
         stamp_duty_rate=args.stamp_duty_rate,
@@ -149,6 +152,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         initial_capital=args.initial_capital,
         costs=costs,
         rebalance=not args.benchmark_buy_and_hold,
+        max_position_weight=args.max_position_weight,
     )
     if args.benchmark_buy_and_hold:
         selection_rule = "all_pool_stocks_buy_and_hold"
@@ -175,6 +179,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             min_signal_strength=args.min_signal_strength,
             initial_capital=args.initial_capital,
             costs=costs,
+            max_position_weight=args.max_position_weight,
         )
         grid.append(
             {
@@ -329,6 +334,7 @@ def simulate_portfolio(
     initial_capital: float,
     costs: CostConfig,
     rebalance: bool = True,
+    max_position_weight: float = 0.10,
 ) -> dict[str, object]:
     if costs.lot_size <= 0 or any(
         value < 0
@@ -340,6 +346,8 @@ def simulate_portfolio(
         )
     ):
         raise ValueError("交易成本参数不能为负，lot_size 必须为正")
+    if not 0 < max_position_weight <= 1:
+        raise ValueError("max_position_weight 必须在 (0, 1] 区间")
     sessions = set(market_dates)
     holdings: dict[str, int] = {}
     cash = float(initial_capital)
@@ -374,7 +382,9 @@ def simulate_portfolio(
             desired = dict(holdings)
         else:
             target_weight = (
-                min(1.0 / len(selected_symbols), 0.10) if selected_symbols else 0.0
+                min(1.0 / len(selected_symbols), max_position_weight)
+                if selected_symbols
+                else 0.0
             )
             desired = {}
             for symbol in selected_symbols:
@@ -492,6 +502,7 @@ def simulate_portfolio(
             "initial_capital": initial_capital,
             "costs": asdict(costs),
             "rebalance": rebalance,
+            "max_position_weight": max_position_weight,
         },
     }
 
@@ -564,9 +575,18 @@ def write_result(
     thresholds_name = Path(thresholds_path).name
     selection_rule = result["parameters"].get("selection_rule")
     is_rebalanced_benchmark = selection_rule == "all_pool_stocks_equal_weight"
-    is_buy_and_hold = selection_rule == "all_pool_stocks_buy_and_hold"
+    is_pool_buy_and_hold = selection_rule == "all_pool_stocks_buy_and_hold"
+    is_etf_buy_and_hold = selection_rule == "broad_market_etf_buy_and_hold"
+    is_buy_and_hold = is_pool_buy_and_hold or is_etf_buy_and_hold
     is_benchmark = is_rebalanced_benchmark or is_buy_and_hold
-    if is_buy_and_hold:
+    if is_etf_buy_and_hold:
+        benchmark_symbol = result["parameters"].get("benchmark_symbol", "")
+        benchmark_name = result["parameters"].get("benchmark_name", "宽基ETF")
+        selection_description = (
+            f"首个可交易周以100%目标仓位买入 `{benchmark_symbol}` {benchmark_name}，"
+            "之后保持实际份额不变，不使用模型预测。"
+        )
+    elif is_pool_buy_and_hold:
         selection_description = (
             "首个可交易周选择固定股票池全部股票等权建仓，之后保持实际股数不变，"
             "不使用模型预测，也不补买首日未成交股票。"
@@ -600,24 +620,34 @@ def write_result(
 
 阈值网格仅作为同一{period_name}上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `{thresholds_name}`。
 """
-    if is_buy_and_hold:
+    if is_etf_buy_and_hold:
+        benchmark_symbol = result["parameters"].get("benchmark_symbol", "")
+        benchmark_name = result["parameters"].get("benchmark_name", "宽基ETF")
+        report_title = f"{benchmark_symbol} {benchmark_name}买入持有基准"
+    elif is_pool_buy_and_hold:
         report_title = "固定50只股票初始等权买入持有基准"
     elif is_rebalanced_benchmark:
         report_title = "固定50只股票每周等权再平衡基准"
     else:
         report_title = "ColProj周频组合模拟"
     input_description = (
-        "预测文件仅用于取得相同周频交易日历，不使用任何预测值。"
+        "预测文件仅用于取得相同周频交易日历；ETF行情来自版本化本地快照，不使用任何预测值。"
+        if is_etf_buy_and_hold
+        else "预测文件仅用于取得相同周频交易日历，不使用任何预测值。"
         if is_benchmark
         else "网站同口径生成的 ColProj 周频预测结果。"
     )
     rule_limitation = (
-        "这是不使用预测信号的固定股票池基准，用于比较市场和股票池本身的收益。"
+        "这是不使用预测信号的可交易宽基ETF基准，用于比较整体市场暴露。"
+        if is_etf_buy_and_hold
+        else "这是不使用预测信号的固定股票池基准，用于比较市场和股票池本身的收益。"
         if is_benchmark
         else "除事先指定的1%参考规则外，其他阈值不得用于回看挑选策略。"
     )
     conclusion = (
-        "本报告是比较基准，不代表推荐等权持有这些股票。"
+        "本报告是比较基准，不代表推荐持有该ETF。"
+        if is_etf_buy_and_hold
+        else "本报告是比较基准，不代表推荐等权持有这些股票。"
         if is_benchmark
         else "当前 ColProj 预测统计尚未确认稳定买入优势，报告不是实盘收益预测。"
     )
@@ -627,10 +657,23 @@ def write_result(
         else "下一市场交易日开盘调仓，第5个市场交易日收盘估值。"
     )
     position_description = (
-        "初始目标等权，受100股整手、首日行情和成交阻断影响的剩余资金持续保留为现金。"
-        if is_buy_and_hold
+        "初始目标仓位100%，受100份整手、费用和滑点影响的剩余资金持续保留为现金。"
+        if is_etf_buy_and_hold
+        else "初始目标等权，受100股整手、首日行情和成交阻断影响的剩余资金持续保留为现金。"
+        if is_pool_buy_and_hold
         else "满足条件的股票等权，单只股票目标权重不超过10%，剩余资金保留现金。"
     )
+    cost_description = (
+        "佣金、双边滑点和100份整手约束均纳入；ETF卖出印花税按0计算。"
+        if is_etf_buy_and_hold
+        else "佣金、卖出印花税、双边滑点和100股整手约束均纳入。"
+    )
+    price_description = (
+        "交易和估值均使用版本化快照中的不复权原始开盘价、收盘价。"
+        if is_etf_buy_and_hold
+        else "交易使用原始开盘价和原始收盘价，收益率重建价格只用于形态检索。"
+    )
+    blocked_unit = "100份" if is_etf_buy_and_hold else "100股"
     text = f"""# 阶段十五：{report_title}
 
 ## 模拟口径
@@ -639,8 +682,8 @@ def write_result(
 - 选择规则：{selection_description}
 - 交易：{trade_description}
 - 仓位：{position_description}
-- 成本：佣金、卖出印花税、双边滑点和100股整手约束均纳入。
-- 价格：交易使用原始开盘价和原始收盘价，收益率重建价格只用于形态检索。
+- 成本：{cost_description}
+- 价格：{price_description}
 
 ## 结果
 
@@ -663,13 +706,13 @@ def write_result(
 | 未成交记录 | {int(metrics['blocked_trade_count'])} |
 
 逐周结果见 `{weekly_name}`，逐笔交易见 `{trades_name}`。涨跌停阻断和缺失行情不会被静默当作已成交，而会在逐笔交易文件中记录原因。
-未成交记录还包括目标资金不足购买一手100股的情况；它不应被解释为全部来自停牌或涨跌停。
+未成交记录还包括目标资金不足购买一手{blocked_unit}的情况；它不应被解释为全部来自停牌或涨跌停。
 
 {sensitivity}
 
 ## 限制
 
-- 默认费率是假设值：佣金万分之3且最低5元、卖出印花税万分之5、买卖滑点各万分之5；请按实际账户费率覆盖参数。
+- 默认费率是假设值：佣金万分之3且最低5元、买卖滑点各万分之5；卖出印花税率为 `{result['parameters']['costs']['stamp_duty_rate']:.2%}`。请按实际账户费率覆盖参数。
 - 这是{period_name}的研究模拟；{rule_limitation}
 - 收益为原始价格收益，未包含现金分红总回报。
 - 涨跌停根据日线OHLC、昨收盘和板块涨跌幅近似推断一字板；没有交易所权威涨跌停状态、集合竞价队列或逐笔成交，仍可能高估成交能力。
