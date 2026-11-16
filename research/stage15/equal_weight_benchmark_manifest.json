@@ -11,6 +11,7 @@
       "minimum_commission": 5.0,
       "lot_size": 100
     },
+    "rebalance": true,
     "selection_rule": "all_pool_stocks_equal_weight"
   },
   "metrics": {
@@ -26,10 +27,12 @@
     "average_holding_count": 43.81720430107527,
     "average_cash_ratio": 0.20455882447348098,
     "total_turnover": 4.21878094152077,
-    "total_transaction_cost": 10569.9182164
+    "total_transaction_cost": 10569.9182164,
+    "executed_trade_count": 1370,
+    "blocked_trade_count": 576
   },
   "weekly_count": 93,
-  "trade_count": 1381,
+  "trade_count": 1946,
   "threshold_grid": [],
   "execution_price_basis": "raw_open_and_raw_close",
   "limitations": [

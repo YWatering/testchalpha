@@ -73,10 +73,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--slippage-rate", type=float, default=0.0005)
     parser.add_argument("--minimum-commission", type=float, default=5.0)
     parser.add_argument("--lot-size", type=int, default=100)
-    parser.add_argument(
+    benchmark_group = parser.add_mutually_exclusive_group()
+    benchmark_group.add_argument(
         "--benchmark-all-stocks",
         action="store_true",
         help="忽略预测值，每周对固定股票池全部股票等权再平衡",
+    )
+    benchmark_group.add_argument(
+        "--benchmark-buy-and-hold",
+        action="store_true",
+        help="忽略预测值，首个可交易周对固定股票池等权建仓后不再平衡",
     )
     parser.add_argument(
         "--weekly-output",
@@ -124,7 +130,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     predictions = load_predictions(args.predictions, args.start_date, args.end_date)
     symbols = load_stock_pool(args.stock_pool)
-    if args.benchmark_all_stocks:
+    is_pool_benchmark = args.benchmark_all_stocks or args.benchmark_buy_and_hold
+    if is_pool_benchmark:
         predictions = build_equal_weight_benchmark(predictions, symbols)
     bars, boards, market_dates = load_database_data(
         args.database,
@@ -141,18 +148,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         min_signal_strength=args.min_signal_strength,
         initial_capital=args.initial_capital,
         costs=costs,
+        rebalance=not args.benchmark_buy_and_hold,
     )
-    result["parameters"]["selection_rule"] = (
-        "all_pool_stocks_equal_weight"
-        if args.benchmark_all_stocks
-        else "predicted_return_threshold"
-    )
-    if args.benchmark_all_stocks:
+    if args.benchmark_buy_and_hold:
+        selection_rule = "all_pool_stocks_buy_and_hold"
+    elif args.benchmark_all_stocks:
+        selection_rule = "all_pool_stocks_equal_weight"
+    else:
+        selection_rule = "predicted_return_threshold"
+    result["parameters"]["selection_rule"] = selection_rule
+    if is_pool_benchmark:
         result["parameters"]["threshold"] = None
     grid = []
     thresholds = (
         ()
-        if args.benchmark_all_stocks
+        if is_pool_benchmark
         else _parse_threshold_grid(args.threshold_grid)
     )
     for threshold in thresholds:
@@ -318,6 +328,7 @@ def simulate_portfolio(
     min_signal_strength: float | None,
     initial_capital: float,
     costs: CostConfig,
+    rebalance: bool = True,
 ) -> dict[str, object]:
     if costs.lot_size <= 0 or any(
         value < 0
@@ -358,17 +369,50 @@ def simulate_portfolio(
             for symbol, quantity in holdings.items()
             if _mark_bar(symbol, entry_date, bars) is not None
         )
-        target_weight = min(1.0 / len(selected_symbols), 0.10) if selected_symbols else 0.0
-        desired = {
-            symbol: _floor_lot(
-                pre_trade_equity * target_weight / (entry_bars[symbol].open * (1 + costs.slippage_rate)),
-                costs.lot_size,
+        unavailable_entries: list[tuple[str, str]] = []
+        if weekly and not rebalance:
+            desired = dict(holdings)
+        else:
+            target_weight = (
+                min(1.0 / len(selected_symbols), 0.10) if selected_symbols else 0.0
             )
-            for symbol in selected_symbols
-            if entry_bars.get(symbol) is not None and entry_bars[symbol].open > 0
-        }
+            desired = {}
+            for symbol in selected_symbols:
+                bar = entry_bars.get(symbol)
+                if bar is None:
+                    unavailable_entries.append((symbol, "missing_entry_bar"))
+                    if holdings.get(symbol, 0) > 0:
+                        desired[symbol] = holdings[symbol]
+                    continue
+                if bar.open <= 0:
+                    unavailable_entries.append((symbol, "invalid_entry_price"))
+                    if holdings.get(symbol, 0) > 0:
+                        desired[symbol] = holdings[symbol]
+                    continue
+                target_quantity = _floor_lot(
+                    pre_trade_equity
+                    * target_weight
+                    / (bar.open * (1 + costs.slippage_rate)),
+                    costs.lot_size,
+                )
+                if target_quantity <= 0:
+                    if holdings.get(symbol, 0) <= 0:
+                        unavailable_entries.append((symbol, "target_below_one_lot"))
+                    continue
+                desired[symbol] = target_quantity
         period_trades: list[Trade] = []
-        blocked = 0
+        blocked = len(unavailable_entries)
+        period_trades.extend(
+            _blocked_trade(
+                signal_date,
+                entry_date,
+                symbol,
+                "buy",
+                0,
+                reason,
+            )
+            for symbol, reason in unavailable_entries
+        )
         for symbol in sorted(set(holdings) | set(desired)):
             current = holdings.get(symbol, 0)
             target = desired.get(symbol, 0)
@@ -438,7 +482,18 @@ def simulate_portfolio(
         )
         previous_close_value = end_value
     metrics = summarize_portfolio(weekly, initial_capital)
-    return {"weekly": weekly, "trades": trades, "metrics": metrics, "parameters": {"threshold": threshold, "min_signal_strength": min_signal_strength, "initial_capital": initial_capital, "costs": asdict(costs)}}
+    return {
+        "weekly": weekly,
+        "trades": trades,
+        "metrics": metrics,
+        "parameters": {
+            "threshold": threshold,
+            "min_signal_strength": min_signal_strength,
+            "initial_capital": initial_capital,
+            "costs": asdict(costs),
+            "rebalance": rebalance,
+        },
+    }
 
 
 def summarize_portfolio(weekly: Sequence[dict[str, object]], initial_capital: float) -> dict[str, float]:
@@ -466,6 +521,10 @@ def summarize_portfolio(weekly: Sequence[dict[str, object]], initial_capital: fl
         "average_cash_ratio": sum(float(row["cash_end"]) / float(row["end_value"]) for row in weekly) / len(weekly) if weekly else 0.0,
         "total_turnover": sum(float(row["turnover"]) for row in weekly),
         "total_transaction_cost": sum(float(row["transaction_cost"]) for row in weekly),
+        "executed_trade_count": sum(
+            int(row["executed_trade_count"]) for row in weekly
+        ),
+        "blocked_trade_count": sum(int(row["blocked_trade_count"]) for row in weekly),
     }
 
 
@@ -503,17 +562,23 @@ def write_result(
     weekly_name = Path(weekly_path).name
     trades_name = Path(trades_path).name
     thresholds_name = Path(thresholds_path).name
-    is_benchmark = result["parameters"].get("selection_rule") == "all_pool_stocks_equal_weight"
-    selection_description = (
-        "每个信号周选择固定股票池全部股票并等权再平衡，不使用模型预测。"
-        if is_benchmark
-        else f"预测收益不低于 `{result['parameters']['threshold']:.2%}`"
-        + (
+    selection_rule = result["parameters"].get("selection_rule")
+    is_rebalanced_benchmark = selection_rule == "all_pool_stocks_equal_weight"
+    is_buy_and_hold = selection_rule == "all_pool_stocks_buy_and_hold"
+    is_benchmark = is_rebalanced_benchmark or is_buy_and_hold
+    if is_buy_and_hold:
+        selection_description = (
+            "首个可交易周选择固定股票池全部股票等权建仓，之后保持实际股数不变，"
+            "不使用模型预测，也不补买首日未成交股票。"
+        )
+    elif is_rebalanced_benchmark:
+        selection_description = "每个信号周选择固定股票池全部股票并等权再平衡，不使用模型预测。"
+    else:
+        selection_description = f"预测收益不低于 `{result['parameters']['threshold']:.2%}`" + (
             f"，稳定性分数不低于 `{result['parameters']['min_signal_strength']:.2f}`。"
             if result["parameters"]["min_signal_strength"] is not None
             else "。"
         )
-    )
     sensitivity = ""
     if threshold_grid:
         sensitivity = f"""
@@ -535,7 +600,12 @@ def write_result(
 
 阈值网格仅作为同一{period_name}上的敏感性描述；不能根据表中最高收益挑选并宣称该阈值有效。阈值结果CSV见 `{thresholds_name}`。
 """
-    report_title = "固定50只股票等权基准" if is_benchmark else "ColProj周频组合模拟"
+    if is_buy_and_hold:
+        report_title = "固定50只股票初始等权买入持有基准"
+    elif is_rebalanced_benchmark:
+        report_title = "固定50只股票每周等权再平衡基准"
+    else:
+        report_title = "ColProj周频组合模拟"
     input_description = (
         "预测文件仅用于取得相同周频交易日历，不使用任何预测值。"
         if is_benchmark
@@ -551,14 +621,24 @@ def write_result(
         if is_benchmark
         else "当前 ColProj 预测统计尚未确认稳定买入优势，报告不是实盘收益预测。"
     )
+    trade_description = (
+        "首个可交易周的下一市场交易日开盘建仓，此后不主动交易；每个第5个市场交易日收盘估值。"
+        if is_buy_and_hold
+        else "下一市场交易日开盘调仓，第5个市场交易日收盘估值。"
+    )
+    position_description = (
+        "初始目标等权，受100股整手、首日行情和成交阻断影响的剩余资金持续保留为现金。"
+        if is_buy_and_hold
+        else "满足条件的股票等权，单只股票目标权重不超过10%，剩余资金保留现金。"
+    )
     text = f"""# 阶段十五：{report_title}
 
 ## 模拟口径
 
 - 输入：{input_description}
 - 选择规则：{selection_description}
-- 交易：下一市场交易日开盘调仓，第5个市场交易日收盘估值。
-- 仓位：满足条件的股票等权，单只股票目标权重不超过10%，剩余资金保留现金。
+- 交易：{trade_description}
+- 仓位：{position_description}
 - 成本：佣金、卖出印花税、双边滑点和100股整手约束均纳入。
 - 价格：交易使用原始开盘价和原始收盘价，收益率重建价格只用于形态检索。
 
@@ -579,8 +659,11 @@ def write_result(
 | 平均现金比例 | {metrics['average_cash_ratio']:.2%} |
 | 累计换手率 | {metrics['total_turnover']:.2%} |
 | 交易成本 | {metrics['total_transaction_cost']:.2f} |
+| 实际成交记录 | {int(metrics['executed_trade_count'])} |
+| 未成交记录 | {int(metrics['blocked_trade_count'])} |
 
 逐周结果见 `{weekly_name}`，逐笔交易见 `{trades_name}`。涨跌停阻断和缺失行情不会被静默当作已成交，而会在逐笔交易文件中记录原因。
+未成交记录还包括目标资金不足购买一手100股的情况；它不应被解释为全部来自停牌或涨跌停。
 
 {sensitivity}
 

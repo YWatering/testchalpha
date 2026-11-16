@@ -1,0 +1,44 @@
+{
+  "schema_version": "stage15-portfolio-v1",
+  "parameters": {
+    "threshold": null,
+    "min_signal_strength": null,
+    "initial_capital": 1000000.0,
+    "costs": {
+      "commission_rate": 0.0003,
+      "stamp_duty_rate": 0.0005,
+      "slippage_rate": 0.0005,
+      "minimum_commission": 5.0,
+      "lot_size": 100
+    },
+    "rebalance": false,
+    "selection_rule": "all_pool_stocks_buy_and_hold"
+  },
+  "metrics": {
+    "period_count": 93.0,
+    "initial_capital": 1000000.0,
+    "final_value": 1103161.5512711506,
+    "cumulative_return": 0.10316155127115056,
+    "annualized_return": 0.056431218786811455,
+    "annualized_volatility": 0.2324869239694303,
+    "max_drawdown": -0.2815043425842195,
+    "weekly_win_rate": 0.5053763440860215,
+    "sharpe_zero_rf": 0.35170334157019445,
+    "average_holding_count": 45.0,
+    "average_cash_ratio": 0.15243925360038507,
+    "total_turnover": 0.8089712834999999,
+    "total_transaction_cost": 654.44872885,
+    "executed_trade_count": 45,
+    "blocked_trade_count": 5
+  },
+  "weekly_count": 93,
+  "trade_count": 50,
+  "threshold_grid": [],
+  "execution_price_basis": "raw_open_and_raw_close",
+  "limitations": [
+    "收益为价格收益，未包含现金分红总回报。",
+    "涨跌停状态根据日线OHLC、昨收盘和板块比例保守推断，数据库没有交易所原始涨跌停状态字段。",
+    "期末持仓按最后可见收盘价估值，未额外模拟期末强制平仓成本。",
+    "结果是研究模拟，不是实盘建议。"
+  ]
+}

@@ -10,7 +10,9 @@
       "slippage_rate": 0.0005,
       "minimum_commission": 5.0,
       "lot_size": 100
-    }
+    },
+    "rebalance": true,
+    "selection_rule": "predicted_return_threshold"
   },
   "metrics": {
     "period_count": 93.0,
@@ -25,10 +27,12 @@
     "average_holding_count": 16.666666666666668,
     "average_cash_ratio": 0.09897407201670706,
     "total_turnover": 110.49214307807708,
-    "total_transaction_cost": 145381.3232055
+    "total_transaction_cost": 145381.3232055,
+    "executed_trade_count": 2399,
+    "blocked_trade_count": 71
   },
   "weekly_count": 93,
-  "trade_count": 2401,
+  "trade_count": 2470,
   "threshold_grid": [
     {
       "predicted_return_threshold": 0.0,
@@ -45,7 +49,9 @@
       "average_holding_count": 25.989247311827956,
       "average_cash_ratio": 0.11887467252533805,
       "total_turnover": 78.73978997135944,
-      "total_transaction_cost": 104485.26543295001
+      "total_transaction_cost": 104485.26543295001,
+      "executed_trade_count": 3136,
+      "blocked_trade_count": 139
     },
     {
       "predicted_return_threshold": 0.005,
@@ -62,7 +68,9 @@
       "average_holding_count": 21.344086021505376,
       "average_cash_ratio": 0.09901223737017471,
       "total_turnover": 95.31621897240288,
-      "total_transaction_cost": 131659.2186039
+      "total_transaction_cost": 131659.2186039,
+      "executed_trade_count": 2828,
+      "blocked_trade_count": 101
     },
     {
       "predicted_return_threshold": 0.01,
@@ -79,7 +87,9 @@
       "average_holding_count": 16.666666666666668,
       "average_cash_ratio": 0.09897407201670706,
       "total_turnover": 110.49214307807708,
-      "total_transaction_cost": 145381.3232055
+      "total_transaction_cost": 145381.3232055,
+      "executed_trade_count": 2399,
+      "blocked_trade_count": 71
     },
     {
       "predicted_return_threshold": 0.015,
@@ -96,7 +106,9 @@
       "average_holding_count": 12.634408602150538,
       "average_cash_ratio": 0.11485756952887115,
       "total_turnover": 120.99270130089337,
-      "total_transaction_cost": 149711.6871707
+      "total_transaction_cost": 149711.6871707,
+      "executed_trade_count": 1950,
+      "blocked_trade_count": 51
     },
     {
       "predicted_return_threshold": 0.02,
@@ -113,7 +125,9 @@
       "average_holding_count": 9.053763440860216,
       "average_cash_ratio": 0.23210012192683507,
       "total_turnover": 110.86990863353353,
-      "total_transaction_cost": 133908.68561295
+      "total_transaction_cost": 133908.68561295,
+      "executed_trade_count": 1430,
+      "blocked_trade_count": 23
     },
     {
       "predicted_return_threshold": 0.05,
@@ -130,7 +144,9 @@
       "average_holding_count": 0.967741935483871,
       "average_cash_ratio": 0.9051028173256515,
       "total_turnover": 16.543179882719954,
-      "total_transaction_cost": 17982.53336875
+      "total_transaction_cost": 17982.53336875,
+      "executed_trade_count": 172,
+      "blocked_trade_count": 1
     }
   ],
   "execution_price_basis": "raw_open_and_raw_close",
